@@ -5,6 +5,7 @@ import json
 import io
 from google.cloud import logging, storage, vision
 from pathlib import Path
+import tempfile
 
 my_file = Path("/home/ericd/storagekey.json")
 if my_file.is_file():
@@ -16,6 +17,32 @@ log_name = 'humanLandmark'
 logging_client = logging.Client()
 logger = logging_client.logger(log_name)
 vision_client = vision.ImageAnnotatorClient()
+
+
+
+
+def minimum_bounding_box(img,alpha=1,mode=0):
+    """ Calculates the minimum bounding box for an image """
+    yproj = img.mean(axis=1)
+    xproj = img.mean(axis=0)
+    if mode == 0:
+    	_get_idx = lambda x: np.where(x>alpha)[0]
+    else:
+    	_get_idx = lambda x: np.where(x<alpha)[0]
+
+    def _get_bounds_on_proj(proj):
+        idx = _get_idx(proj)
+        return(idx[0],
+               idx[-1])
+
+    x1,x2 = _get_bounds_on_proj(xproj)
+    y1,y2 = _get_bounds_on_proj(yproj)
+    return([y1,x1,y2,x2])
+
+def crop_img_from_bbox(img,bbox):
+    y1,x1,y2,x2 = bbox
+    return(img[y1:y2,x1:x2])
+
 
 def get_angle(eye1, eye2, nose):
     '''Getting the angle to rotate the images: Rotation Correction algorithm'''
@@ -189,7 +216,7 @@ def frame( crop_dict, base_dict):
     crop = im_r.crop(( int(x_l), int(y_l), int(x_h), int(y_h) ))
     #then we glue under the mask
     mask2 = mask.copy()
-    mask.paste(crop,(int(x_l+dcenter.real), int(y_l+dcenter.imag) ))
+    mask.paste(crop, (int(x_l + dcenter.real), int(y_l + dcenter.imag) ))
     array_m = np.array(mask2)[:,:,3]
     array_b = np.array(mask)
     array_b[:,:,3] = array_m
@@ -232,12 +259,13 @@ def expanded_bb( final_points):
     dist_base = abs(complex(left_x, left_y)-complex(right_x, right_y ) )
     return (int(base_center_x), int(base_center_y) ), dist_base
 
-
+    
 
 
 def human_eyes(crop_image_path):
-    # Downloading original image    
+        # Downloading original image    
     split_path = crop_image_path.split('/')
+    file = None
     try:
         key = split_path[-2]
         key_m = split_path[-2]+'m.png'
@@ -247,38 +275,35 @@ def human_eyes(crop_image_path):
     except Exception as e:
         logger.log_text(f"Wrong path structure {str(e)} on {crop_image_path}", severity='ERROR')
         return 'wrong input'
-    if not os.path.exists("/tmp"):
-        os.makedirs("/tmp")
-    tmp_local_path = '/tmp/' + key
-    tmp_local_path_m = '/tmp/' + key_m
-
-    try:
-        downloadBlob(bucket, source_blob_name, tmp_local_path)
-        downloadBlob(bucket, source_blob_name_m, tmp_local_path_m)
-    except Exception as e:
-        logger.log_text(f"problem downloading image {str(e)} on {key}", severity='ERROR')
-        return 'wrong input'
-    try:
-        input_image = Image.open(tmp_local_path) #.convert('RGB')
-        input_image_m = Image.open(tmp_local_path_m)
-    except Exception as e:
-        logger.log_text(f"Problem opening the image {str(e)} on {key}", severity='ERROR')
-        return 'image corrupted'
-    angles = {}
-    k='0'
-    angle, human_landmarks, eyes, littleImage = APIHumanLandmarks(input_image)
-    angle_m, human_landmarks_m, eyes_m, littleImage_m = APIHumanLandmarks(input_image_m)
-    print(f'{eyes}-{eyes_m}')
-    if not eyes:
-        logger.log_text(f"Missing output on API Human Landmarks on {key}", severity='ERROR')
-        
-    angles[str(k) + "_angle"] = angle
-    tmp_crop_file_name = source_blob_name.replace(split_path[-1], '') + f'{str(k) + "/crop_of_subject"}'
-    im_center, dist_im = expanded_bb(  final_points=eyes)  #test
-    im_center_m, dist_im_m = expanded_bb(  final_points=eyes_m)  #test
-    crop_dict={'angle':angle,'hl': human_landmarks, 'eyes':eyes, 'image':littleImage,'center':im_center, 'dist':dist_im}
-    mask_dict={'angle':angle_m,'hl': human_landmarks_m, 'eyes':eyes_m, 'image':littleImage_m,'center':im_center_m, 'dist':dist_im_m}
-    file = tempfunction(k, bucket, tmp_crop_file_name, key, crop_dict, mask_dict)
+    with tempfile.TemporaryDirectory() as tmpdirname:
+        print('created temporary directory', tmpdirname)
+        #if not os.path.exists("/tmp"):
+        #    os.makedirs("/tmp")
+        tmp_local_path = tmpdirname + '/' + key
+        tmp_local_path_m = tmpdirname + '/' + key_m
+        tmp_labels = tmpdirname + '/' + f'{key}_label'
+        try:
+            downloadBlob(bucket, source_blob_name, tmp_local_path)
+            downloadBlob(bucket, source_blob_name_m, tmp_local_path_m)
+        except Exception as e:
+            logger.log_text(f"problem downloading image {str(e)} on {key}", severity='ERROR')
+            return 'wrong input'
+        try:
+            input_image = Image.open(tmp_local_path) #.convert('RGB')
+            input_image_m = Image.open(tmp_local_path_m)
+        except Exception as e:
+            logger.log_text(f"Problem opening the image {str(e)} on {key}", severity='ERROR')
+            return 'image corrupted'
+        angle, human_landmarks, eyes, littleImage = APIHumanLandmarks(input_image)
+        angle_m, human_landmarks_m, eyes_m, littleImage_m = APIHumanLandmarks(input_image_m)
+        if not eyes:
+            logger.log_text(f"Missing output on API Human Landmarks on {key}", severity='ERROR')
+        im_center, dist_im = expanded_bb(  final_points=eyes)  #test
+        im_center_m, dist_im_m = expanded_bb(  final_points=eyes_m)  #test
+        crop_dict={'angle':angle,'hl': human_landmarks, 'eyes':eyes, 'image':littleImage,'center':im_center, 'dist':dist_im}
+        mask_dict={'angle':angle_m,'hl': human_landmarks_m, 'eyes':eyes_m, 'image':littleImage_m,'center':im_center_m, 'dist':dist_im_m}
+        file =  frame(crop_dict, mask_dict)
+        file.save(tmp_labels, 'png')
     return file
 
 if __name__ == "__main__":
