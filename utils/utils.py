@@ -19,8 +19,6 @@ logger = logging_client.logger(log_name)
 vision_client = vision.ImageAnnotatorClient()
 
 
-
-
 def minimum_bounding_box(img,alpha=1,mode=0):
     """ Calculates the minimum bounding box for an image """
     yproj = img.mean(axis=1)
@@ -42,7 +40,6 @@ def minimum_bounding_box(img,alpha=1,mode=0):
 def crop_img_from_bbox(img,bbox):
     y1,x1,y2,x2 = bbox
     return(img[y1:y2,x1:x2])
-
 
 def get_angle(eye1, eye2, nose):
     '''Getting the angle to rotate the images: Rotation Correction algorithm'''
@@ -259,8 +256,71 @@ def expanded_bb( final_points):
     dist_base = abs(complex(left_x, left_y)-complex(right_x, right_y ) )
     return (int(base_center_x), int(base_center_y) ), dist_base
 
-    
+def get_filter_weights(laplacians, center, min_bbox):
+    image = laplacians['lap_crop']
+    target = laplacians['lap_mask']
+    h_im = 350
+    w_im = 300
+    vector=[]
+    y1,x1,y2,x2 = min_bbox
+    for i in range(30):
+        resized_cropT = resize(image, (h_im+i,h_im+i), anti_aliasing=True)
+        dcenter = int(i*center.real/300)+int(i*center.imag/350)*1j
+        new_center = center + dcenter
+        for a in range(-10,10):
+            rot_cropT = rotate(resized_cropT/255, angle= a/20, center = (new_center.real, new_center.imag) )*255
+            dx,dy = dcenter.real, dcenter.imag
+            extended_bbox = max(0, y1-20+dcenter.imag), max(0, x1-30+dcenter.real), min(350, y2+20+dcenter.imag), min(300, x2+30+dcenter.real)
+            original_crop = crop_img_from_bbox(rot_cropT, extended_bbox)
+            out = cv2.filter2D(original_crop, -1, target, anchor=(0,0))
+            vector.append([out,i,a])
 
+    return None
+
+def apply_conv(originL,rot_crop,rot_crop_mask):
+    out = cv2.filter2D(originL, -1, rot_cropL, anchor=(0,0))
+    return(out)
+
+
+def lap(image):
+    rgb_org_im = img_as_ubyte(image)     
+    origin = np.float32(cv2.cvtColor(rgb_org_im, cv2.COLOR_BGR2GRAY))
+    origin_rows, origin_cols = origin.shape
+    originL = cv2.Laplacian(origin, -1)
+    return originL
+
+
+
+def secrec(file, crop_dict, mask_dict):
+    borders = lap(file[:,:,:3])
+    mask = mask_dict['image']
+    min_bbox = minimum_bounding_box( mask[:,:,3], alpha=0, mode=0) #([y1,x1,y2,x2])#at this moment I also know the center of both images
+    mask_crop = crop_img_from_bbox( mask, min_bbox)
+    l_mask = lap(mask_crop[:,:,:3])*mask_crop[:,:,3]
+    newdict = {'lap_crop':borders,'lap_mask':l_mask}
+    shapes, filters_ = get_filter_weights( newdict, mask_dict['center'], min_bbox)
+    which_cuda = '0'
+    input_tensor = torch.Tensor(l_mask).unsqueeze(0).unsqueeze(0)
+    if self.use_cuda:#adapt
+        input_tensor = input_tensor.cuda(torch.device('cuda:'+ which_cuda))
+        out = conv2d(filters_.cuda(torch.device('cuda:'+ which_cuda)), input_tensor, padding=0).cpu()
+    else:
+        out = conv2d( filters_, input_tensor, padding=0).cpu()
+    print(out.shape)
+
+    
+def first_reconciliation(input_image, input_image_m, key, tmp_labels):
+    angle, human_landmarks, eyes, littleImage = APIHumanLandmarks(input_image)
+    angle_m, human_landmarks_m, eyes_m, littleImage_m = APIHumanLandmarks(input_image_m)
+    if not eyes:
+        logger.log_text(f"Missing output on API Human Landmarks on {key}", severity='ERROR')
+    im_center, dist_im = expanded_bb(  final_points=eyes)  #test
+    im_center_m, dist_im_m = expanded_bb(  final_points=eyes_m)  #test
+    crop_dict={'angle':angle,'hl': human_landmarks, 'eyes':eyes, 'image':littleImage,'center':im_center, 'dist':dist_im}
+    mask_dict={'angle':angle_m,'hl': human_landmarks_m, 'eyes':eyes_m, 'image':littleImage_m,'center':im_center_m, 'dist':dist_im_m}
+    file =  frame(crop_dict, mask_dict)
+    file.save(tmp_labels, 'png')
+    return file, crop_dict, mask_dict
 
 def human_eyes(crop_image_path):
         # Downloading original image    
@@ -294,24 +354,19 @@ def human_eyes(crop_image_path):
         except Exception as e:
             logger.log_text(f"Problem opening the image {str(e)} on {key}", severity='ERROR')
             return 'image corrupted'
-        angle, human_landmarks, eyes, littleImage = APIHumanLandmarks(input_image)
-        angle_m, human_landmarks_m, eyes_m, littleImage_m = APIHumanLandmarks(input_image_m)
-        if not eyes:
-            logger.log_text(f"Missing output on API Human Landmarks on {key}", severity='ERROR')
-        im_center, dist_im = expanded_bb(  final_points=eyes)  #test
-        im_center_m, dist_im_m = expanded_bb(  final_points=eyes_m)  #test
-        crop_dict={'angle':angle,'hl': human_landmarks, 'eyes':eyes, 'image':littleImage,'center':im_center, 'dist':dist_im}
-        mask_dict={'angle':angle_m,'hl': human_landmarks_m, 'eyes':eyes_m, 'image':littleImage_m,'center':im_center_m, 'dist':dist_im_m}
-        file =  frame(crop_dict, mask_dict)
-        file.save(tmp_labels, 'png')
-    return file
-
+        #if human then:
+        file, crop_dict, mask_dict  = first_reconciliation(input_image, input_image_m, key, tmp_labels)
+        file_2 =  secrec(file, crop_dict, mask_dict)
+        return file
+    
+        
 if __name__ == "__main__":
     import time
     start = time.time()
     input_image_path = "divvyup_store/socks/600000/crop_of_subject"
     # input_image_path = "model_staging/orientation/image_testing/humans/dat99.jpeg"
-    human_eyes(input_image_path)
+    file= human_eyes(input_image_path)
+    
     end = time.time()
     print(f'Total time: {end - start}')
     """
