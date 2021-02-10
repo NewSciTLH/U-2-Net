@@ -6,7 +6,21 @@ import io
 from google.cloud import logging, storage, vision
 from pathlib import Path
 import tempfile
+from skimage import img_as_ubyte
+from skimage.transform import rescale, resize, rotate
+import cv2
+import importlib
+import utils
+importlib.reload(utils)
+#%matplotlib inline
+#import matplotlib.pyplot as plt
+import pdb
 
+
+
+
+
+#from utils import minimum_bounding_box, crop_img_from_bbox
 my_file = Path("/home/ericd/storagekey.json")
 if my_file.is_file():
     storage_client = storage.Client.from_service_account_json(my_file)
@@ -17,6 +31,7 @@ log_name = 'humanLandmark'
 logging_client = logging.Client()
 logger = logging_client.logger(log_name)
 vision_client = vision.ImageAnnotatorClient()
+
 
 
 def minimum_bounding_box(img,alpha=1,mode=0):
@@ -230,16 +245,6 @@ def tempfunction( k, bucket, crop_name, key,  crop_dict, base_dict):
     #final, crop, boxCoord, angle, center = frame(crop_dict, base_dict)
     final.save(f'/tmp/{key}crop_{k}_temp', 'png')
     return final
-    #upload_blob(bucket, f'/tmp/{key}crop_{k}_temp', crop_name+'_temp')
-    #crop.save(f'/tmp/{key}crop_{k}', 'png')
-    #upload_blob(bucket, f'/tmp/{key}crop_{k}', crop_name)
-    #updateBlobMetadata(bucket, crop_name, boxCoord, angle, center)
-
-    #for i in range(5):
-    #    final = frame(image,  orientation, dx, dy, im_center, dist_im, h_im, w_im, angle, base_left=(115+3*i,160), base_right=(185-3*i,160))
-    #    final.save(f'/tmp/crop_{k}', 'png')
-    #    upload_blob(bucket, f'/tmp/crop_{k}', crop_name+str(i))
-
 
 def expanded_bb( final_points):
     # The function expects the height and width of an image (I called it cropped because 
@@ -256,26 +261,67 @@ def expanded_bb( final_points):
     dist_base = abs(complex(left_x, left_y)-complex(right_x, right_y ) )
     return (int(base_center_x), int(base_center_y) ), dist_base
 
-def get_filter_weights(laplacians, center, min_bbox):
+
+def secrec(file, crop_dict, mask_dict):
+    mask = np.array(mask_dict['image']).copy()    
+    crop = np.array(file).copy()
+    borders = lap(crop[:,:,:3])
+    min_bbox = minimum_bounding_box( mask[:,:,3], alpha=0, mode=0) #([y1,x1,y2,x2])#at this moment I also know the center of both images
+    mask_crop = crop_img_from_bbox( mask, min_bbox).copy()
+    l_mask = lap(mask_crop[:,:,:3])*mask_crop[:,:,3]
+    newdict = {'lap_crop':borders,'lap_mask':l_mask}
+    #shapes, filters_ = 
+    rec = get_filter_weights( newdict,file, mask_dict, min_bbox)
+    return rec
+   
+
+def get_filter_weights(laplacians, file, mask_dict,  min_bbox):
+    center = complex(mask_dict['center'][0], mask_dict['center'][1])
     image = laplacians['lap_crop']
     target = laplacians['lap_mask']
     h_im = 350
     w_im = 300
     vector=[]
     y1,x1,y2,x2 = min_bbox
+    conv_valT = -900
     for i in range(30):
         resized_cropT = resize(image, (h_im+i,h_im+i), anti_aliasing=True)
-        dcenter = int(i*center.real/300)+int(i*center.imag/350)*1j
+        dcenter =complex(int(i*center.real/300), int(i*center.imag/350))
         new_center = center + dcenter
         for a in range(-10,10):
             rot_cropT = rotate(resized_cropT/255, angle= a/20, center = (new_center.real, new_center.imag) )*255
             dx,dy = dcenter.real, dcenter.imag
-            extended_bbox = max(0, y1-20+dcenter.imag), max(0, x1-30+dcenter.real), min(350, y2+20+dcenter.imag), min(300, x2+30+dcenter.real)
+            extended_bbox = max(0, int(y1-20+dcenter.imag)), max(0, int(x1-30+dcenter.real)), min(350, int(y2+20+dcenter.imag)), min(300, int(x2+30+dcenter.real))
             original_crop = crop_img_from_bbox(rot_cropT, extended_bbox)
             out = cv2.filter2D(original_crop, -1, target, anchor=(0,0))
-            vector.append([out,i,a])
+            maxmeasure = np.max(out)
+            if conv_valT < maxmeasure:
+                conv_valt = maxmeasure
+                res = i
+                rot = a
+                ncenter = new_center
+    print((h_im+res,h_im+res), rot/20)
+    
+    Image_base = file.copy()
+    proposal_size = Image_base.resize((h_im+res,h_im+res))
+    proposal_rot = proposal_size.rotate(rot/20, center=(ncenter.real, ncenter.imag))
+    h_p = proposal_rot.height #350
+    w_p = proposal_rot.width  #300
+    x_l = int(max(0,(center-ncenter).real))
+    x_r = int(min(300, (center +h_p-ncenter).real))
+    y_l = int(max(0,(center-ncenter).imag))
+    y_r = int(min(350, (center -ncenter).imag+w_p))
+    x_pl = int((ncenter-(center-x_l)).real)
+    x_pr = int((ncenter+(x_r-center)).real)
+    y_pl = int((ncenter-(center)).imag+y_l)
+    y_pr = int((ncenter+(-center)).imag+y_r)
+    
+    base= np.array(Image_base)
+    proposal = np.array(proposal_rot)
+    base[y_l:y_r,  x_l:x_r, :3] = proposal[ y_pl:y_pr, x_pl:x_pr,:3] 
+    output = Image.fromarray(base)
+    return output
 
-    return None
 
 def apply_conv(originL,rot_crop,rot_crop_mask):
     out = cv2.filter2D(originL, -1, rot_cropL, anchor=(0,0))
@@ -285,28 +331,11 @@ def apply_conv(originL,rot_crop,rot_crop_mask):
 def lap(image):
     rgb_org_im = img_as_ubyte(image)     
     origin = np.float32(cv2.cvtColor(rgb_org_im, cv2.COLOR_BGR2GRAY))
-    origin_rows, origin_cols = origin.shape
     originL = cv2.Laplacian(origin, -1)
     return originL
 
 
 
-def secrec(file, crop_dict, mask_dict):
-    borders = lap(file[:,:,:3])
-    mask = mask_dict['image']
-    min_bbox = minimum_bounding_box( mask[:,:,3], alpha=0, mode=0) #([y1,x1,y2,x2])#at this moment I also know the center of both images
-    mask_crop = crop_img_from_bbox( mask, min_bbox)
-    l_mask = lap(mask_crop[:,:,:3])*mask_crop[:,:,3]
-    newdict = {'lap_crop':borders,'lap_mask':l_mask}
-    shapes, filters_ = get_filter_weights( newdict, mask_dict['center'], min_bbox)
-    which_cuda = '0'
-    input_tensor = torch.Tensor(l_mask).unsqueeze(0).unsqueeze(0)
-    if self.use_cuda:#adapt
-        input_tensor = input_tensor.cuda(torch.device('cuda:'+ which_cuda))
-        out = conv2d(filters_.cuda(torch.device('cuda:'+ which_cuda)), input_tensor, padding=0).cpu()
-    else:
-        out = conv2d( filters_, input_tensor, padding=0).cpu()
-    print(out.shape)
 
     
 def first_reconciliation(input_image, input_image_m, key, tmp_labels):
@@ -355,9 +384,12 @@ def human_eyes(crop_image_path):
             logger.log_text(f"Problem opening the image {str(e)} on {key}", severity='ERROR')
             return 'image corrupted'
         #if human then:
+        startl = time.time()
         file, crop_dict, mask_dict  = first_reconciliation(input_image, input_image_m, key, tmp_labels)
-        file_2 =  secrec(file, crop_dict, mask_dict)
-        return file
+        print(f'end of first reconciliation {time.time()-startl}')
+        firststep = file.copy()
+        file_2 =  secrec(firststep, crop_dict, mask_dict)
+        return file, file_2
     
         
 if __name__ == "__main__":
@@ -365,28 +397,18 @@ if __name__ == "__main__":
     start = time.time()
     input_image_path = "divvyup_store/socks/600000/crop_of_subject"
     # input_image_path = "model_staging/orientation/image_testing/humans/dat99.jpeg"
-    file= human_eyes(input_image_path)
+    file, file_2= human_eyes(input_image_path)
     
+    #w=10
+    #h=10
+    #fig=plt.figure(figsize=(15, 15))
+    #fig.add_subplot(2,1,1)
+    #plt.imshow(file)
+    #fig.add_subplot(2,1,2)
+    #plt.imshow(file_2)
+    #plt.show()
+
     end = time.time()
     print(f'Total time: {end - start}')
-    """
-    Steps:
-    1.-> input = (input_image_path,orientation,bbs)
-    2.-> test for folder
-    3.-> get metadata
-    4.-> call landmarkdetector
-    5.-> check weights
-    6.-> Initialize predictor
-    7.-> test for image name
-    8.-> download image
-    9.-> try to open and rotate, crop the image from metadata
-    information
-    10.-> make prediction
-    11.-> move to cpu, separate predictions, get pixels for eyes,
-    apply gaussian filter
-    12,13,14.-> get local max and make final predictions for
-    eye_1, eye_2, nose
-    15.-> get angle
-    16.-> save jsoncito
-    17.-> update metadata with rotation angles
+
     """
