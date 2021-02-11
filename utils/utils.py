@@ -12,8 +12,8 @@ import cv2
 import importlib
 import utils
 importlib.reload(utils)
-#%matplotlib inline
-#import matplotlib.pyplot as plt
+%matplotlib inline
+import matplotlib.pyplot as plt
 import pdb
 
 
@@ -137,8 +137,7 @@ def APIHumanLandmarks(input_image):
     """ Calls G object recognition for obtaining facial landmarks"""
     # Opening the original image, correcting the orientation, and cropping it
     try:
-        image = input_image
-        cropped_image = image
+        cropped_image = input_image.copy()
     except Exception as e:
         logger.log_text(f"Image corrupted/preprocess failed {str(e)} ", severity='ERROR')
         return None, None, None, None
@@ -181,10 +180,10 @@ def APIHumanLandmarks(input_image):
     except Exception as e:
         logger.log_text(f"Problem getting landmarks or angle: {str(e)}", severity='ERROR')
         return None, None, None, None
-    return angle, human_landmarks, eyes, cropped_image
+    return angle, human_landmarks, eyes
 
     
-def frame( crop_dict, base_dict):
+def frame(crop_dict, base_dict):
     #current code: expands base, rotates crop
     #goal: expands and rotates crop, base untouch
     #base_left = (135,200) 
@@ -199,7 +198,7 @@ def frame( crop_dict, base_dict):
     base_center_x, base_center_y = base_dict['center']
     base_center = complex(base_center_x, base_center_y)
     dist_base = base_dict['dist']
-    mask = base_dict['image']
+    mask = base_dict['image'].copy()
     h_base = mask.height #350
     w_base = mask.width  #300
 
@@ -208,7 +207,7 @@ def frame( crop_dict, base_dict):
     im_center_x, im_center_y = crop_dict['center']
     im_center = complex(im_center_x, im_center_y)
     dist_crop = crop_dict['dist']
-    im = crop_dict['image']
+    im = crop_dict['image'].copy()
     h_im = im.height
     w_im = im.width
 
@@ -263,64 +262,82 @@ def expanded_bb( final_points):
 
 
 def secrec(file, crop_dict, mask_dict):
+    #file has as rbg from crop dic and a mask from mask dict
     mask = np.array(mask_dict['image']).copy()    
     crop = np.array(file).copy()
-    borders = lap(crop[:,:,:3])
+    l_crop = lap(crop[:,:,:3]) #the underlying rbg we want to improve
     min_bbox = minimum_bounding_box( mask[:,:,3], alpha=0, mode=0) #([y1,x1,y2,x2])#at this moment I also know the center of both images
     mask_crop = crop_img_from_bbox( mask, min_bbox).copy()
     l_mask = lap(mask_crop[:,:,:3])*mask_crop[:,:,3]
-    newdict = {'lap_crop':borders,'lap_mask':l_mask}
+    newdict = {'lap_crop':l_crop,'lap_mask':l_mask}
     #shapes, filters_ = 
-    rec = get_filter_weights( newdict,file, mask_dict, min_bbox)
+    rec = get_filter_weights( newdict, file, mask_dict, min_bbox)
     return rec
    
 
 def get_filter_weights(laplacians, file, mask_dict,  min_bbox):
     center = complex(mask_dict['center'][0], mask_dict['center'][1])
-    image = laplacians['lap_crop']
-    target = laplacians['lap_mask']
+    image = laplacians['lap_crop'].copy()
+    target = laplacians['lap_mask'].copy()
     h_im = 350
     w_im = 300
     vector=[]
     y1,x1,y2,x2 = min_bbox
-    conv_valT = -900
-    for i in range(30):
+    conv_val = -900
+    res = 0
+    rot = 0
+    results = None
+    ncenter = center
+    for i in range(-30, 30):
         resized_cropT = resize(image, (h_im+i,h_im+i), anti_aliasing=True)
         dcenter =complex(int(i*center.real/300), int(i*center.imag/350))
         new_center = center + dcenter
         for a in range(-10,10):
             rot_cropT = rotate(resized_cropT/255, angle= a/20, center = (new_center.real, new_center.imag) )*255
             dx,dy = dcenter.real, dcenter.imag
-            extended_bbox = max(0, int(y1-20+dcenter.imag)), max(0, int(x1-30+dcenter.real)), min(350, int(y2+20+dcenter.imag)), min(300, int(x2+30+dcenter.real))
-            original_crop = crop_img_from_bbox(rot_cropT, extended_bbox)
-            out = cv2.filter2D(original_crop, -1, target, anchor=(0,0))
-            maxmeasure = np.max(out)
-            if conv_valT < maxmeasure:
-                conv_valt = maxmeasure
+            #extended_bbox = max(0, int(y1-20+dcenter.imag)), max(0, int(x1-30+dcenter.real)), min(350, int(y2+20+dcenter.imag)), min(300, int(x2+30+dcenter.real))
+            #original_crop = crop_img_from_bbox(rot_cropT, extended_bbox)
+            #out = cv2.filter2D(original_crop, -1, target, anchor=(0,0))
+            big_out = cv2.filter2D(rot_cropT, -1, target, anchor=(0,0))
+            if big_out.shape[0]<target.shape[0]+1 or big_out.shape[1]<target.shape[1]+1:
+                continue
+            
+            out = big_out[:-target.shape[0],:-target.shape[1]]
+            maxmeasure = np.max(out)#np.max(outT[:-rot_cropT.shape[0],:-rot_cropT.shape[1]])
+            if conv_val < maxmeasure:
+                conv_val = maxmeasure
                 res = i
                 rot = a
+                results = out
                 ncenter = new_center
+    # Up to here we know reescaling and rotation.   
+    #we take the original image, 
+    #we multiply by the mask and we crop, 
+    #then we use convolution on the target image.
+    #we crop into a backgrond image
     print((h_im+res,h_im+res), rot/20)
-    
-    Image_base = file.copy()
-    proposal_size = Image_base.resize((h_im+res,h_im+res))
+    #====================
+    l_c = laplacians['lap_crop'].copy()
+    l_m = laplacians['lap_mask'].copy()
+    assert len(results)
+    loc = np.where(results == conv_val)
+    assert len(loc[0]) == 1
+    Y1,X1,Y2,X2 =  (loc[0][0], loc[1][0],
+                                    loc[0][0]+l_m.shape[0],
+                                    loc[1][0]+l_m.shape[1])
+    y1,x1,y2,x2 =  min_bbox #([y1,x1,y2,x2])
+    #pdb.set_trace()
+    previous_prediction =  file.copy()
+    proposal_size = previous_prediction.resize((h_im+res,h_im+res))
     proposal_rot = proposal_size.rotate(rot/20, center=(ncenter.real, ncenter.imag))
-    h_p = proposal_rot.height #350
-    w_p = proposal_rot.width  #300
-    x_l = int(max(0,(center-ncenter).real))
-    x_r = int(min(300, (center +h_p-ncenter).real))
-    y_l = int(max(0,(center-ncenter).imag))
-    y_r = int(min(350, (center -ncenter).imag+w_p))
-    x_pl = int((ncenter-(center-x_l)).real)
-    x_pr = int((ncenter+(x_r-center)).real)
-    y_pl = int((ncenter-(center)).imag+y_l)
-    y_pr = int((ncenter+(-center)).imag+y_r)
+    pre_np = np.array(proposal_rot)
+    mask = mask_dict['image'].copy()
     
-    base= np.array(Image_base)
-    proposal = np.array(proposal_rot)
-    base[y_l:y_r,  x_l:x_r, :3] = proposal[ y_pl:y_pr, x_pl:x_pr,:3] 
-    output = Image.fromarray(base)
-    return output
+    mask_np = np.array(mask)
+    mask_np[y1:y2,x1:x2,:3] = pre_np[Y1:Y2,X1:X2,:3]
+    print(np.max(mask_np), np.max(mask_np[:,:,:3]), np.max(mask_np[:,:,3]),np.min(mask_np[:,:,3]),np.mean(mask_np[:,:,3]))
+    final = Image.fromarray(mask_np)
+    return final
 
 
 def apply_conv(originL,rot_crop,rot_crop_mask):
@@ -339,16 +356,18 @@ def lap(image):
 
     
 def first_reconciliation(input_image, input_image_m, key, tmp_labels):
-    angle, human_landmarks, eyes, littleImage = APIHumanLandmarks(input_image)
-    angle_m, human_landmarks_m, eyes_m, littleImage_m = APIHumanLandmarks(input_image_m)
+    angle, human_landmarks, eyes = APIHumanLandmarks(input_image)
+    angle_m, human_landmarks_m, eyes_m = APIHumanLandmarks(input_image_m)
     if not eyes:
         logger.log_text(f"Missing output on API Human Landmarks on {key}", severity='ERROR')
     im_center, dist_im = expanded_bb(  final_points=eyes)  #test
     im_center_m, dist_im_m = expanded_bb(  final_points=eyes_m)  #test
-    crop_dict={'angle':angle,'hl': human_landmarks, 'eyes':eyes, 'image':littleImage,'center':im_center, 'dist':dist_im}
-    mask_dict={'angle':angle_m,'hl': human_landmarks_m, 'eyes':eyes_m, 'image':littleImage_m,'center':im_center_m, 'dist':dist_im_m}
+    crop_dict={'angle':angle,'hl': human_landmarks, 'eyes':eyes, 'image':input_image,'center':im_center, 'dist':dist_im}
+    mask_dict={'angle':angle_m,'hl': human_landmarks_m, 'eyes':eyes_m, 'image':input_image_m,'center':im_center_m, 'dist':dist_im_m}
     file =  frame(crop_dict, mask_dict)
     file.save(tmp_labels, 'png')
+    #plt.imshow(mask_dict['image'])
+    #plt.show()
     return file, crop_dict, mask_dict
 
 def human_eyes(crop_image_path):
@@ -381,6 +400,7 @@ def human_eyes(crop_image_path):
             input_image = Image.open(tmp_local_path) #.convert('RGB')
             input_image_m = Image.open(tmp_local_path_m)
         except Exception as e:
+            print(str(e))
             logger.log_text(f"Problem opening the image {str(e)} on {key}", severity='ERROR')
             return 'image corrupted'
         #if human then:
@@ -395,20 +415,32 @@ def human_eyes(crop_image_path):
 if __name__ == "__main__":
     import time
     start = time.time()
-    input_image_path = "divvyup_store/socks/600000/crop_of_subject"
+    input_image_path = "divvyup_store/socks/600004/crop_of_subject"
     # input_image_path = "model_staging/orientation/image_testing/humans/dat99.jpeg"
-    file, file_2= human_eyes(input_image_path)
-    
-    #w=10
-    #h=10
-    #fig=plt.figure(figsize=(15, 15))
-    #fig.add_subplot(2,1,1)
-    #plt.imshow(file)
-    #fig.add_subplot(2,1,2)
-    #plt.imshow(file_2)
-    #plt.show()
+    #file = human_eyes(input_image_path)
+    print('first process')
+    firststep, secstep= human_eyes(input_image_path)
 
     end = time.time()
     print(f'Total time: {end - start}')
-
+    """
+    Steps:
+    1.-> input = (input_image_path,orientation,bbs)
+    2.-> test for folder
+    3.-> get metadata
+    4.-> call landmarkdetector
+    5.-> check weights
+    6.-> Initialize predictor
+    7.-> test for image name
+    8.-> download image
+    9.-> try to open and rotate, crop the image from metadata
+    information
+    10.-> make prediction
+    11.-> move to cpu, separate predictions, get pixels for eyes,
+    apply gaussian filter
+    12,13,14.-> get local max and make final predictions for
+    eye_1, eye_2, nose
+    15.-> get angle
+    16.-> save jsoncito
+    17.-> update metadata with rotation angles
     """
