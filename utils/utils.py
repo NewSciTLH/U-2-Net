@@ -10,11 +10,12 @@ from skimage import img_as_ubyte
 from skimage.transform import rescale, resize, rotate
 import cv2
 import importlib
-import utils
-importlib.reload(utils)
-%matplotlib inline
-import matplotlib.pyplot as plt
+#import utils
+#importlib.reload(utils)
+#%matplotlib inline
+#import matplotlib.pyplot as plt
 import pdb
+import time
 
 
 
@@ -233,17 +234,6 @@ def frame(crop_dict, base_dict):
     array_b[:,:,3] = array_m
     final = Image.fromarray(array_b)
     return final
-        
-def tempfunction( k, bucket, crop_name, key,  crop_dict, base_dict):
-    # saves the actual crop to the bucket
-    #base is the final product
-    #image is the crop
-    #base_left=(115+3*4,160), base_right=(185-3*4,160)
-    final = frame(crop_dict, base_dict)
-    
-    #final, crop, boxCoord, angle, center = frame(crop_dict, base_dict)
-    final.save(f'/tmp/{key}crop_{k}_temp', 'png')
-    return final
 
 def expanded_bb( final_points):
     # The function expects the height and width of an image (I called it cropped because 
@@ -261,8 +251,36 @@ def expanded_bb( final_points):
     return (int(base_center_x), int(base_center_y) ), dist_base
 
 
-def secrec(file, crop_dict, mask_dict):
-    #file has as rbg from crop dic and a mask from mask dict
+
+
+def lap(image):
+    #transforms image for cv2 to compute laplacian
+    rgb_org_im = img_as_ubyte(image)     
+    origin = np.float32(cv2.cvtColor(rgb_org_im, cv2.COLOR_BGR2GRAY))
+    originL = cv2.Laplacian(origin, -1)
+    return originL
+
+
+
+
+    
+def first_reconciliation(input_image, input_image_m, key, tmp_labels):
+    #finds landmarks on both images and identify the images with those coordinates
+    angle, human_landmarks, eyes = APIHumanLandmarks(input_image)
+    angle_m, human_landmarks_m, eyes_m = APIHumanLandmarks(input_image_m)
+    if not eyes:
+        logger.log_text(f"Missing output on API Human Landmarks on {key}", severity='ERROR')
+    im_center, dist_im = expanded_bb(  final_points=eyes)  #test
+    im_center_m, dist_im_m = expanded_bb(  final_points=eyes_m)  #test
+    crop_dict={'angle':angle,'hl': human_landmarks, 'eyes':eyes, 'image':input_image,'center':im_center, 'dist':dist_im}
+    mask_dict={'angle':angle_m,'hl': human_landmarks_m, 'eyes':eyes_m, 'image':input_image_m,'center':im_center_m, 'dist':dist_im_m}
+    file =  frame(crop_dict, mask_dict)
+    file.save(tmp_labels, 'png')
+    return file,  mask_dict
+
+
+def secrec(file, mask_dict):
+    #from file we use the  rbg, mask comes from mask dict
     mask = np.array(mask_dict['image']).copy()    
     crop = np.array(file).copy()
     l_crop = lap(crop[:,:,:3]) #the underlying rbg we want to improve
@@ -270,12 +288,14 @@ def secrec(file, crop_dict, mask_dict):
     mask_crop = crop_img_from_bbox( mask, min_bbox).copy()
     l_mask = lap(mask_crop[:,:,:3])*mask_crop[:,:,3]
     newdict = {'lap_crop':l_crop,'lap_mask':l_mask}
-    #shapes, filters_ = 
     rec = get_filter_weights( newdict, file, mask_dict, min_bbox)
     return rec
    
 
 def get_filter_weights(laplacians, file, mask_dict,  min_bbox):
+    #we take the original image, 
+    #we multiply by the mask and we crop, 
+    #then we use convolution on the target image.
     center = complex(mask_dict['center'][0], mask_dict['center'][1])
     image = laplacians['lap_crop'].copy()
     target = laplacians['lap_mask'].copy()
@@ -292,12 +312,9 @@ def get_filter_weights(laplacians, file, mask_dict,  min_bbox):
         resized_cropT = resize(image, (h_im+i,h_im+i), anti_aliasing=True)
         dcenter =complex(int(i*center.real/300), int(i*center.imag/350))
         new_center = center + dcenter
-        for a in range(-10,10):
-            rot_cropT = rotate(resized_cropT/255, angle= a/20, center = (new_center.real, new_center.imag) )*255
+        for a in range(-15,15):#default -10,10 with angle /20
+            rot_cropT = rotate(resized_cropT/255, angle= a/40, center = (new_center.real, new_center.imag) )*255
             dx,dy = dcenter.real, dcenter.imag
-            #extended_bbox = max(0, int(y1-20+dcenter.imag)), max(0, int(x1-30+dcenter.real)), min(350, int(y2+20+dcenter.imag)), min(300, int(x2+30+dcenter.real))
-            #original_crop = crop_img_from_bbox(rot_cropT, extended_bbox)
-            #out = cv2.filter2D(original_crop, -1, target, anchor=(0,0))
             big_out = cv2.filter2D(rot_cropT, -1, target, anchor=(0,0))
             if big_out.shape[0]<target.shape[0]+1 or big_out.shape[1]<target.shape[1]+1:
                 continue
@@ -310,13 +327,7 @@ def get_filter_weights(laplacians, file, mask_dict,  min_bbox):
                 rot = a
                 results = out
                 ncenter = new_center
-    # Up to here we know reescaling and rotation.   
-    #we take the original image, 
-    #we multiply by the mask and we crop, 
-    #then we use convolution on the target image.
-    #we crop into a backgrond image
     print((h_im+res,h_im+res), rot/20)
-    #====================
     l_c = laplacians['lap_crop'].copy()
     l_m = laplacians['lap_mask'].copy()
     assert len(results)
@@ -326,7 +337,6 @@ def get_filter_weights(laplacians, file, mask_dict,  min_bbox):
                                     loc[0][0]+l_m.shape[0],
                                     loc[1][0]+l_m.shape[1])
     y1,x1,y2,x2 =  min_bbox #([y1,x1,y2,x2])
-    #pdb.set_trace()
     previous_prediction =  file.copy()
     proposal_size = previous_prediction.resize((h_im+res,h_im+res))
     proposal_rot = proposal_size.rotate(rot/20, center=(ncenter.real, ncenter.imag))
@@ -340,38 +350,8 @@ def get_filter_weights(laplacians, file, mask_dict,  min_bbox):
     return final
 
 
-def apply_conv(originL,rot_crop,rot_crop_mask):
-    out = cv2.filter2D(originL, -1, rot_cropL, anchor=(0,0))
-    return(out)
-
-
-def lap(image):
-    rgb_org_im = img_as_ubyte(image)     
-    origin = np.float32(cv2.cvtColor(rgb_org_im, cv2.COLOR_BGR2GRAY))
-    originL = cv2.Laplacian(origin, -1)
-    return originL
-
-
-
-
-    
-def first_reconciliation(input_image, input_image_m, key, tmp_labels):
-    angle, human_landmarks, eyes = APIHumanLandmarks(input_image)
-    angle_m, human_landmarks_m, eyes_m = APIHumanLandmarks(input_image_m)
-    if not eyes:
-        logger.log_text(f"Missing output on API Human Landmarks on {key}", severity='ERROR')
-    im_center, dist_im = expanded_bb(  final_points=eyes)  #test
-    im_center_m, dist_im_m = expanded_bb(  final_points=eyes_m)  #test
-    crop_dict={'angle':angle,'hl': human_landmarks, 'eyes':eyes, 'image':input_image,'center':im_center, 'dist':dist_im}
-    mask_dict={'angle':angle_m,'hl': human_landmarks_m, 'eyes':eyes_m, 'image':input_image_m,'center':im_center_m, 'dist':dist_im_m}
-    file =  frame(crop_dict, mask_dict)
-    file.save(tmp_labels, 'png')
-    #plt.imshow(mask_dict['image'])
-    #plt.show()
-    return file, crop_dict, mask_dict
-
 def human_eyes(crop_image_path):
-        # Downloading original image    
+    # based on image it applies reconciliation    
     split_path = crop_image_path.split('/')
     file = None
     try:
@@ -385,8 +365,6 @@ def human_eyes(crop_image_path):
         return 'wrong input'
     with tempfile.TemporaryDirectory() as tmpdirname:
         print('created temporary directory', tmpdirname)
-        #if not os.path.exists("/tmp"):
-        #    os.makedirs("/tmp")
         tmp_local_path = tmpdirname + '/' + key
         tmp_local_path_m = tmpdirname + '/' + key_m
         tmp_labels = tmpdirname + '/' + f'{key}_label'
@@ -405,42 +383,20 @@ def human_eyes(crop_image_path):
             return 'image corrupted'
         #if human then:
         startl = time.time()
-        file, crop_dict, mask_dict  = first_reconciliation(input_image, input_image_m, key, tmp_labels)
-        print(f'end of first reconciliation {time.time()-startl}')
+        file,  mask_dict  = first_reconciliation(input_image, input_image_m, key, tmp_labels)
+        middle = time.time()
+        print(f'end of first reconciliation {middle-startl}')
         firststep = file.copy()
-        file_2 =  secrec(firststep, crop_dict, mask_dict)
-        return file, file_2
+        file_2 =  secrec(firststep, mask_dict)
+        print(f'second reconciliation lasted {time.time()-middle}')
+        file_3 = secrec(input_image,  mask_dict)
+        return file, file_2, file_3
     
         
 if __name__ == "__main__":
-    import time
     start = time.time()
-    input_image_path = "divvyup_store/socks/600004/crop_of_subject"
-    # input_image_path = "model_staging/orientation/image_testing/humans/dat99.jpeg"
-    #file = human_eyes(input_image_path)
+    input_image_path = "divvyup_store/socks/600000/crop_of_subject"
     print('first process')
-    firststep, secstep= human_eyes(input_image_path)
-
+    firststep, secstep, thirdstep= human_eyes(input_image_path)
     end = time.time()
     print(f'Total time: {end - start}')
-    """
-    Steps:
-    1.-> input = (input_image_path,orientation,bbs)
-    2.-> test for folder
-    3.-> get metadata
-    4.-> call landmarkdetector
-    5.-> check weights
-    6.-> Initialize predictor
-    7.-> test for image name
-    8.-> download image
-    9.-> try to open and rotate, crop the image from metadata
-    information
-    10.-> make prediction
-    11.-> move to cpu, separate predictions, get pixels for eyes,
-    apply gaussian filter
-    12,13,14.-> get local max and make final predictions for
-    eye_1, eye_2, nose
-    15.-> get angle
-    16.-> save jsoncito
-    17.-> update metadata with rotation angles
-    """
