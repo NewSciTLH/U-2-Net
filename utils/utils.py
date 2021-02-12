@@ -16,10 +16,8 @@ import importlib
 #import matplotlib.pyplot as plt
 import pdb
 import time
-
-
-
-
+import math
+from utils.detector import Detector
 
 #from utils import minimum_bounding_box, crop_img_from_bbox
 my_file = Path("/home/ericd/storagekey.json")
@@ -33,8 +31,33 @@ logging_client = logging.Client()
 logger = logging_client.logger(log_name)
 vision_client = vision.ImageAnnotatorClient()
 
+dataset_id = 'divvyup_metadata'  # replace with your dataset ID
+table_id = 'tbd'  # replace with your table ID
+table_ref = queryclient.dataset(dataset_id).table(table_id)
+table = queryclient.get_table(table_ref)  # API request
 
 
+def get_angle2(eyes):
+    eye1 = eyes['left_eye']
+    eye2 = eyes['right_eye']
+    eye1_l, eye1_r = eye1
+    eye2_l, eye2_r = eye2
+    eye1_l=float(eye1_l)
+    eye1_r=float(eye1_r)
+    eye2_l=float(eye2_l)
+    eye2_r=float(eye2_r)
+    print()
+    if eye1_l == eye2_l:
+        if eye1_r > eye2_r:
+            angle = -90
+        elif eye1_r < eye2_r:
+            angle = 90
+        else:
+            angle = 0
+    else:
+        angle = math.atan((eye2_r-eye1_r)/(eye2_l-eye1_l))* (180 / math.pi)
+    return -angle
+        
 def minimum_bounding_box(img,alpha=1,mode=0):
     """ Calculates the minimum bounding box for an image """
     yproj = img.mean(axis=1)
@@ -141,7 +164,7 @@ def APIHumanLandmarks(input_image):
         cropped_image = input_image.copy()
     except Exception as e:
         logger.log_text(f"Image corrupted/preprocess failed {str(e)} ", severity='ERROR')
-        return None, None, None, None
+        return None, None#, None, None
 
     b = io.BytesIO()
     cropped_image.save(b, format='PNG')
@@ -151,13 +174,13 @@ def APIHumanLandmarks(input_image):
         response_fl = vision_client.annotate_image({'image': {'content': b}, 'features': [{'type': vision.enums.Feature.Type.FACE_DETECTION}, ], })
     except Exception as e:
         logger.log_text(f"Problem getting API response: {str(e)}", severity='ERROR')
-        return None, None, None, None
+        return None, None#, None, None
 
-    try:
-        human_landmarks = MessageToJsonFacialLandmarks(response_fl)
-    except Exception as e:
-        logger.log_text(f"Problem building json file: {str(e)}", severity='ERROR')
-        return None, None, None, None
+    #try:
+    #    human_landmarks = MessageToJsonFacialLandmarks(response_fl)
+    #except Exception as e:
+    #    logger.log_text(f"Problem building json file: {str(e)}", severity='ERROR')
+    #    return None, None, None, None
 
     try:
         left_eye = (response_fl.face_annotations[0].landmarks[0].position.x,
@@ -176,12 +199,13 @@ def APIHumanLandmarks(input_image):
         #print(angle)  # john
 
         angle = round(angle % 360, 2)
-        #print(angle)
+        angle2 = get_angle2({'left_eye':left_eye, 'right_eye':right_eye})
+        print(angle,' angles',angle2 )
 
     except Exception as e:
         logger.log_text(f"Problem getting landmarks or angle: {str(e)}", severity='ERROR')
-        return None, None, None, None
-    return angle, human_landmarks, eyes
+        return None, None#, None, None
+    return angle,  eyes
 
     
 def frame(crop_dict, base_dict):
@@ -261,19 +285,30 @@ def lap(image):
     return originL
 
 
-
-
+def APIPetLandmarks(input_image,pet):
+    det = Detector(True)
+    eyes_dict = det.get_landmarks(im_files=input_image,subject_class=pet)#im_files, subject_class
+            
+    angle = get_angle2(eyes_dict)
+    eyes = eyes_dict['left_eye'], eyes_dict['right_eye']
+    return angle, eyes  
     
-def first_reconciliation(input_image, input_image_m, key, tmp_labels):
+def first_reconciliation(input_image, input_image_m, key, tmp_labels, label='human'):
     #finds landmarks on both images and identify the images with those coordinates
-    angle, human_landmarks, eyes = APIHumanLandmarks(input_image)
-    angle_m, human_landmarks_m, eyes_m = APIHumanLandmarks(input_image_m)
-    if not eyes:
+    
+    if label=='human':
+        angle,  eyes = APIHumanLandmarks(input_image)
+        angle_m, eyes_m = APIHumanLandmarks(input_image_m)
+    else:
+        angle,  eyes = APIPetLandmarks(input_image, label)
+        angle_m, eyes_m = APIDogLandmarks(input_image_m)
+    
+    if not eyes: 
         logger.log_text(f"Missing output on API Human Landmarks on {key}", severity='ERROR')
     im_center, dist_im = expanded_bb(  final_points=eyes)  #test
     im_center_m, dist_im_m = expanded_bb(  final_points=eyes_m)  #test
-    crop_dict={'angle':angle,'hl': human_landmarks, 'eyes':eyes, 'image':input_image,'center':im_center, 'dist':dist_im}
-    mask_dict={'angle':angle_m,'hl': human_landmarks_m, 'eyes':eyes_m, 'image':input_image_m,'center':im_center_m, 'dist':dist_im_m}
+    crop_dict={'angle':angle, 'eyes':eyes, 'image':input_image,'center':im_center, 'dist':dist_im}
+    mask_dict={'angle':angle_m, 'eyes':eyes_m, 'image':input_image_m,'center':im_center_m, 'dist':dist_im_m}
     file =  frame(crop_dict, mask_dict)
     file.save(tmp_labels, 'png')
     return file,  mask_dict
@@ -348,12 +383,9 @@ def get_filter_weights(laplacians, file, mask_dict,  min_bbox):
     print(np.max(mask_np), np.max(mask_np[:,:,:3]), np.max(mask_np[:,:,3]),np.min(mask_np[:,:,3]),np.mean(mask_np[:,:,3]))
     final = Image.fromarray(mask_np)
     return final
-
-
-def human_eyes(crop_image_path):
+def temp_pair(crop_image_path):
     # based on image it applies reconciliation    
     split_path = crop_image_path.split('/')
-    file = None
     try:
         key = split_path[-2]
         key_m = split_path[-2]+'m.png'
@@ -363,6 +395,37 @@ def human_eyes(crop_image_path):
     except Exception as e:
         logger.log_text(f"Wrong path structure {str(e)} on {crop_image_path}", severity='ERROR')
         return 'wrong input'
+    return key, key_m, source_blob_name, source_blob_name_m, bucket,  'human'
+
+def writetable(files):
+    #{"f_rec":file, "s_rec":file_2, "t_rec":file_3, 'class':classes, "key":key}
+    rows_to_insert = []
+
+    rows_to_insert.append(
+        {"f_rec":files["f_rec"],
+        "s_rec":files["s_rec"],
+        "t_rec":files["t_rec"],
+         "class" : files["class"],
+         "key": files["key"]
+        })
+
+    errors = queryclient.insert_rows(table, rows_to_insert)  # API request
+    assert errors == []
+    print('querry submitted!')
+    
+def human_eyes(crop_image_path):
+    # based on image it applies reconciliation    
+    file = None
+    human = True
+    if type( crop_image_path)==str:
+        key, key_m, source_blob_name, source_blob_name_m, bucket, classes =  temp_pair(crop_image_path)
+    else:      
+        key = 'image'
+        key_m = 'mask'
+        source_blob_name = crop_image_path['crop']
+        source_blob_name_m = crop_image_path['mask']
+        bucket = "tbd"
+        classes = crop_image_path['classes']
     with tempfile.TemporaryDirectory() as tmpdirname:
         print('created temporary directory', tmpdirname)
         tmp_local_path = tmpdirname + '/' + key
@@ -381,22 +444,26 @@ def human_eyes(crop_image_path):
             print(str(e))
             logger.log_text(f"Problem opening the image {str(e)} on {key}", severity='ERROR')
             return 'image corrupted'
-        #if human then:
+        #class#'cats''dogs''''
         startl = time.time()
-        file,  mask_dict  = first_reconciliation(input_image, input_image_m, key, tmp_labels)
+        file,  mask_dict  = first_reconciliation(input_image, input_image_m, key, tmp_labels, classes)
         middle = time.time()
         print(f'end of first reconciliation {middle-startl}')
         firststep = file.copy()
         file_2 =  secrec(firststep, mask_dict)
         print(f'second reconciliation lasted {time.time()-middle}')
         file_3 = secrec(input_image,  mask_dict)
-        return file, file_2, file_3
+        file_dict = {"f_rec":file, "s_rec":file_2, "t_rec":file_3, 'class':classes, "key":key}
+        writetable( file_dict)
+        return 'Good'
     
         
 if __name__ == "__main__":
     start = time.time()
     input_image_path = "divvyup_store/socks/600000/crop_of_subject"
+    dataloader = input_image_path#this function queries a table and returns a pair of strings
     print('first process')
-    firststep, secstep, thirdstep= human_eyes(input_image_path)
+    files = human_eyes(dataloader)
+    #firststep, secstep, thirdstep = 
     end = time.time()
     print(f'Total time: {end - start}')
