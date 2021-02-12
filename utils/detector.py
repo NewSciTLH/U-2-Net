@@ -7,7 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 # some_file.py
 import sys
-import landmark_utils as utils
+import utils.landmark_utils as utils
 
 
 class Detector:
@@ -66,11 +66,11 @@ class Detector:
             resolution. 
         """
         
-        if type(im_files) == str:
+        if type(im_files) != type([]) :
             im_files = [im_files]
         
         # Load model from checkpoints
-        checkpoint_dir = Path('checkpoints/')
+        checkpoint_dir = Path('/home/ericd/U-2-Net/checkpoints')#Path('checkpoints/')
         model = torchvision.models.segmentation.fcn_resnet50(num_classes=self.n_label_dict[subject_class]+1)
         state_dict = torch.load(checkpoint_dir/ self.model_paths[subject_class], map_location=torch.device(self.device))
         model.load_state_dict(state_dict)
@@ -79,7 +79,9 @@ class Detector:
         eyes = {}
         for im_file in im_files:
             # Downscale image for faster computation
-            im = Image.open(im_file)
+            #im = Image.open(im_file)
+            im = im_file.copy()
+            
             im = F.resize(im, 300)
 
             # Predict landmarks
