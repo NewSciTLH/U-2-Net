@@ -33,7 +33,7 @@ class Detector:
     
     def __init__(self, cuda=True):
         
-        self.device = 'cuda' if cuda else 'cpu'
+        self.device = 'cuda:0' if cuda else 'cpu'
         
         self.model_paths = {
             'cats':'cat_model_epoch_015.pth', 
@@ -72,7 +72,8 @@ class Detector:
         # Load model from checkpoints
         checkpoint_dir = '/home/ericd/U-2-Net/checkpoints'#Path('checkpoints/')
         model = torchvision.models.segmentation.fcn_resnet50(num_classes=self.n_label_dict[subject_class]+1)
-        print(self.model_paths, subject_class)
+        print(self.device,'000')
+        print('self.model_paths')
         state_dict = torch.load(checkpoint_dir+'/'+self.model_paths[subject_class], map_location=torch.device(self.device))
         model.load_state_dict(state_dict)
         model = model.to(torch.device(self.device))
@@ -80,6 +81,7 @@ class Detector:
         eyes = {}
         for im_file in im_files:
             # Downscale image for faster computation
+            #only for one file
             #im = Image.open(im_file)
             im = im_file.copy()
             
@@ -94,8 +96,9 @@ class Detector:
             im_x, im_y = im.size[0], im.size[1]
             l_eye = np.array([landmarks[0][0][1]/im_x, landmarks[0][0][0]/im_y])
             r_eye = np.array([landmarks[1][0][1]/im_x, landmarks[1][0][0]/im_y])
-
-            eyes[im_file] = {'right_eye': r_eye, 'left_eye': l_eye}
+            #only for one file   
+            #eyes[im_file] = {'right_eye': r_eye, 'left_eye': l_eye}
+            eyes = {'right_eye': r_eye, 'left_eye': l_eye}
         
         return eyes
     
