@@ -26,14 +26,19 @@ print('done')
 def create_data():
     """Query those images in the folders socks, koozies and stickers by time of creation"""
     QUERY="""SELECT * 
-FROM ?
+FROM reconciliation_input
+
 """
     results = query_client.query(QUERY).result()
     print(f"We have {results.total_rows} folders of orders in the directories socks, koozies and stickers")
-    to_list = [ {"mask":item[''].replace('divvyup_store/',''),
-                 "crop":item[''].replace('divvyup_store/',''),
-                 "classes":item['classes']}]
-    with concurrent.futures.ProcessPoolExecutor(max_workers=40) as executor:
+     key, key_m, source_blob_name, source_blob_name_m, bucket, 'human'
+    to_list = [ {"key":item['key'],
+                 "key_m":item['key_m'],
+                 "bucket": item['simple_crop'].split('/')[0],
+                 "mask":item['simple_crop'].replace(f'{item['simple_crop'].split('/')[0]}/',''),
+                 "crop":item['final_crop'].replace(f'{item['simple_crop'].split('/')[0]}/',''),
+                 "classes":item['subject_class']}]
+    with concurrent.futures.ProcessPoolExecutor(max_workers=3) as executor:
         executor.map(utils.human_eyes, to_list)
     print('in dataDec/ you can find the files organized by day')
 
