@@ -1,12 +1,14 @@
 from utils import utils
 from utils import detector
 from google.cloud import logging
-  
+import os  
 from google.cloud import storage
 from google.cloud import bigquery
+import threading
+import concurrent.futures
 
 logging_client = logging.Client()
-log_name = 'Auto-colorization'
+log_name = 'Reconciliation'
 logger = logging_client.logger(log_name)
 
 if os.path.isfile('/home/ericd/bqkey.json'): 
@@ -28,21 +30,26 @@ print('done')
 def create_data():
     """Query those images in the folders socks, koozies and stickers by time of creation"""
     QUERY="""SELECT * 
-FROM reconciliation_input
+FROM newsci-1532356874110.divvyup_metadata.reconciliation_input
 
 """
     results = query_client.query(QUERY).result()
     print(f"We have {results.total_rows} folders of orders in the directories socks, koozies and stickers")
-    key, key_m, source_blob_name, source_blob_name_m, bucket, 'human'
-    to_list = [ {"key":item['key'],
-                 "key_m":item['key_m'],
+    #key, key_m, source_blob_name, source_blob_name_m, bucket, 'human'
+    to_list = [ {"key":str(item['key']),
+                 "key_m":str(item['mask_key'])+'m',
                  "bucket": item['simple_crop'].split('/')[0],
-                 "mask":item['simple_crop'].replace(f'{item['simple_crop'].split('/')[0]}/',''),
-                 "crop":item['final_crop'].replace(f'{item['simple_crop'].split('/')[0]}/',''),
-                 "classes":item['subject_class']}]
-    with concurrent.futures.ProcessPoolExecutor(max_workers=3) as executor:
-        executor.map(utils.human_eyes, to_list)
-    print('in dataDec/ you can find the files organized by day')
+                 "mask":item['simple_crop'].replace(f"{item['simple_crop'].split('/')[0]}/",''),
+                 "crop":item['final_crop'].replace(f"{item['simple_crop'].split('/')[0]}/",''),
+                 "classes":item['subject_class']} for item in results ]
+    for d_c in to_list:
+        utils.human_eyes(d_c)
+    #with concurrent.futures.ProcessPoolExecutor(max_workers=4) as executor:
+    #    executor.map(utils.human_eyes, to_list)
+    print('program ended')
 
 if __name__ == "__main__":
+    print('test')
+    create_data()
+    print('test ended')
     

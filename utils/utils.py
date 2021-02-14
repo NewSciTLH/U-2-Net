@@ -3,7 +3,7 @@ import numpy as np
 import os
 import json
 import io
-from google.cloud import logging, storage, vision
+from google.cloud import logging, storage, vision, bigquery
 from pathlib import Path
 import tempfile
 from skimage import img_as_ubyte
@@ -17,7 +17,7 @@ import importlib
 import pdb
 import time
 import math
-import detector
+from utils import detector
 import importlib
 importlib.reload(detector)
 import torch
@@ -40,7 +40,7 @@ table = queryclient.get_table(table_ref)  # API request
     
     
     
-log_name = 'humanLandmark'
+log_name = 'Reconciliation'
 logging_client = logging.Client()
 logger = logging_client.logger(log_name)
 vision_client = vision.ImageAnnotatorClient()
@@ -297,7 +297,7 @@ def lap(image):
     return originL
 
 
-def APIPetLandmarks(input_image,pet):
+def APIPetLandmarks(input_image,pet='dogs'):
     det = detector.Detector(torch.cuda.is_available())
     trheechannel = input_image.copy()
     trheechannel = trheechannel.convert('RGB')
@@ -434,10 +434,23 @@ def human_eyes(crop_image_path):
     # based on image it applies reconciliation    
     file = None
     human = True
-    key, key_m, source_blob_name, source_blob_name_m, bucket_name,  classes =  temp_pair(crop_image_path)
+    key, key_m, source_blob_name, source_blob_name_m, bucket_name,  classes =  temp_pair2(crop_image_path)
     # [ {"key":,"key_m":,"bucket":,"mask":,"crop":,"classes":}]
+    destination_blob_name = f'reconciliation_test/{key}/{key}'
+    destination_blob_name_2 = f'reconciliation_test/{key}/{key}_2'
+    destination_blob_name_3 = f'reconciliation_test/{key}/{key}_3'
+    destination_blob_name_4 = f'reconciliation_test/{key}/{key}_4'
+
     with tempfile.TemporaryDirectory() as tmpdirname:
+        tmp_local_path_o = tmpdirname + '/' + key+'out.png'
+        tmp_local_path_o2 = tmpdirname + '/' + key+'out2.png'
+        tmp_local_path_o3 = tmpdirname + '/' + key+'out3.png'
+        tmp_local_path_o4 = tmpdirname + '/' + key+'out4.png'
+
         print('created temporary directory', tmpdirname)
+        results = {'key' : key,
+             'simple_crop':bucket_name+'/'+source_blob_name,
+             'final_crop':bucket_name+'/'+source_blob_name_m}
         tmp_local_path = tmpdirname + '/' + key
         tmp_local_path_m = tmpdirname + '/' + key_m
         tmp_labels = tmpdirname + '/' + f'{key}_label'
@@ -446,7 +459,6 @@ def human_eyes(crop_image_path):
             downloadBlob(bucket_name, source_blob_name_m, tmp_local_path_m)
         except Exception as e:
             print(str(e))
-           
             logger.log_text(f"problem downloading image {str(e)} on {key}", severity='ERROR')
             return 'wrong input',None, None
         try:
@@ -457,50 +469,51 @@ def human_eyes(crop_image_path):
             logger.log_text(f"Problem opening the image {str(e)} on {key}", severity='ERROR')
             return 'image corrupted'
         #class#'cats''dogs''''
-        startl = time.time()
-        file,  mask_dict  = first_reconciliation(input_image, input_image_m, key, tmp_labels, classes)
-        middle = time.time()
-        print(f'end of first reconciliation {middle-startl}')
-        firststep = file.copy()
-        file_2 =  second_reconciliation(firststep, mask_dict)
-        fo = time.time()
-        print(f'second reconciliation lasted {fo-middle}')
-        file_3 = second_reconciliation(input_image,  mask_dict)
-        ro = time.time()
-        print(f'third reconciliaton lated {ro-fo}')
-        file_4 = third_reconciliation(input_image, input_image_m)
-    #return file, file_2, file_3, file_4
-    tmp_local_path_o = tmpdirname + '/' + key+'out.png'
-    tmp_local_path_o2 = tmpdirname + '/' + key+'out2.png'
-    tmp_local_path_o3 = tmpdirname + '/' + key+'out3.png'
-    tmp_local_path_o4 = tmpdirname + '/' + key+'out4.png'
-    file.save(tmp_local_path_o)
-    file_2.save(tmp_local_path_o2)
-    file_3.save(tmp_local_path_o3)
-    file_4.save(tmp_local_path_o4)
-    destination_blob_name = f'reconciliation_test/{key}/{key}'
-    destination_blob_name_2 = f'reconciliation_test/{key}/{key}_2'
-    destination_blob_name_3 = f'reconciliation_test/{key}/{key}_3'
-    destination_blob_name_4 = f'reconciliation_test/{key}/{key}_4'
-    upload_blob('model_staging', tmp_local_path_o, destination_blob_name)#to determine
-    upload_blob('model_staging', tmp_local_path_o2, destination_blob_name_2)#to determine
-    upload_blob('model_staging', tmp_local_path_o3, destination_blob_name_3)#to determine
-    upload_blob('model_staging', tmp_local_path_o4, destination_blob_name_4)#to determine
+        try:
+            startl = time.time()
+            file,  mask_dict  = first_reconciliation(input_image, input_image_m, key, tmp_labels, classes)
+            file.save(tmp_local_path_o)
+            upload_blob('model_staging', tmp_local_path_o, destination_blob_name)#to determine
+            results['rec_1']='model_staging/'+destination_blob_name,
+            middle = time.time()
+            print(f'end of first reconciliation {middle-startl}')
+            firststep = file.copy()
+            file_2 =  second_reconciliation(firststep, mask_dict)
+            file_2.save(tmp_local_path_o2)
+            upload_blob('model_staging', tmp_local_path_o2, destination_blob_name_2)#to determine
+            results['rec_2']='model_staging/'+destination_blob_name_2,
+            fo = time.time()
+            print(f'second reconciliation lasted {fo-middle}')
+        except Exception as e:
+            print(str(e))
+            logger.log_text(f"Problem with first reconciliation {str(e)} on {key}", severity='ERROR')
+        try:
+            file_3 = second_reconciliation(input_image,  {'image':input_image_m})#['image']
+            file_3.save(tmp_local_path_o3)
+            upload_blob('model_staging', tmp_local_path_o3, destination_blob_name_3)#to determine
+            results['rec_3']='model_staging/'+destination_blob_name_3,
+            ro = time.time()
+            print(f'third reconciliaton lated {ro-fo}')
+        except Exception as e:
+            print(str(e))
+            logger.log_text(f"Problem with third reconciliation {str(e)} on {key}", severity='ERROR')
+        try:        
+            file_4 = third_reconciliation(input_image, input_image_m)
+            file_4.save(tmp_local_path_o4)
+            upload_blob('model_staging', tmp_local_path_o4, destination_blob_name_4)#to determine
+            results['rec_4'] = 'model_staging/'+destination_blob_name_4
+        except Exception as e:
+            print(str(e))
+            logger.log_text(f"Problem with third reconciliation {str(e)} on {key}", severity='ERROR')
 
-    rows_to_insert.append(
-        {'rec_1':destination_blob_name,
-        'rec_2':destination_blob_name_2,
-        'rec_3':destination_blob_name_3,
-        'rec_4':destination_blob_name_4,
-         'key' : key,
-         'simple_crop':source_blob_name,
-         'final_crop':source_blob_name_m
-        })
-    errors = queryclient.insert_rows(table, rows_to_insert)  # API request
-    assert errors == []
-    print('querry submitted!')
+        #return file, file_2, file_3, file_4
 
-    return file, file_2, file_3, file_4
+        rows_to_insert = []
+        rows_to_insert.append(results)
+        errors = queryclient.insert_rows(table, rows_to_insert)  # API request
+        assert errors == []
+        print('querry submitted!')
+
     
 
 
@@ -516,7 +529,7 @@ def temp_pair(crop_image_path):
     except Exception as e:
         logger.log_text(f"Wrong path structure {str(e)} on {crop_image_path}", severity='ERROR')
         return 'wrong input'
-    return key, key_m, source_blob_name, source_blob_name_m, bucket, 'human'
+    return key, key_m, source_blob_name, source_blob_name_m, 'divvyup_store', 'human'
     
         
 if __name__ == "__main__":
@@ -524,7 +537,8 @@ if __name__ == "__main__":
     input_image_path = "divvyup_store/socks/600000/crop_of_subject"
     dataloader = input_image_path#this function queries a table and returns a pair of strings
     print('first process')
-    firststep, secstep, thirdstep, fourstep = human_eyes(dataloader)
-    print(firststep.size, secstep.size, thirdstep.size, fourstep.size,)
+    human_eyes(dataloader)
+    #firststep, secstep, thirdstep, fourstep = human_eyes(dataloader)
+    #print(firststep.size, secstep.size, thirdstep.size, fourstep.size,)
     end = time.time()
     print(f'Total time: {end - start}')
