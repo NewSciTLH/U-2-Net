@@ -31,17 +31,18 @@ def create_data():
     """Query those images in the folders socks, koozies and stickers by time of creation"""
     QUERY="""SELECT * 
 FROM newsci-1532356874110.divvyup_metadata.reconciliation_input
-
 """
     results = query_client.query(QUERY).result()
     print(f"We have {results.total_rows} folders of orders in the directories socks, koozies and stickers")
     #key, key_m, source_blob_name, source_blob_name_m, bucket, 'human'
     to_list = [ {"key":str(item['key']),
                  "key_m":str(item['mask_key'])+'m',
-                 "bucket": item['simple_crop'].split('/')[0],
-                 "mask":item['simple_crop'].replace(f"{item['simple_crop'].split('/')[0]}/",''),
-                 "crop":item['final_crop'].replace(f"{item['simple_crop'].split('/')[0]}/",''),
-                 "classes":item['subject_class']} for item in results ]
+                 "bucket": 'divvyup_data',
+                 "mask":item['simple_crop'],
+                 "crop":item['final_crop'],
+                 "classes":item['subject_class']} for item in results if item['subject_class']
+              ]
+    print(f'We have {len(to_list)} valid inputs')
     for d_c in to_list:
         utils.human_eyes(d_c)
     #with concurrent.futures.ProcessPoolExecutor(max_workers=4) as executor:

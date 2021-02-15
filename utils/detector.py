@@ -72,8 +72,6 @@ class Detector:
         # Load model from checkpoints
         checkpoint_dir = '/home/ericd/U-2-Net/checkpoints'#Path('checkpoints/')
         model = torchvision.models.segmentation.fcn_resnet50(num_classes=self.n_label_dict[subject_class]+1)
-        print(self.device,'000')
-        print('self.model_paths')
         state_dict = torch.load(checkpoint_dir+'/'+self.model_paths[subject_class], map_location=torch.device(self.device))
         model.load_state_dict(state_dict)
         model = model.to(torch.device(self.device))

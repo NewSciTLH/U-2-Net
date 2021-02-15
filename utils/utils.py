@@ -55,7 +55,7 @@ def get_angle2(eyes):
     eye1_r=float(eye1_r)
     eye2_l=float(eye2_l)
     eye2_r=float(eye2_r)
-    print()
+    
     if eye1_l == eye2_l:
         if eye1_r > eye2_r:
             angle = -90
@@ -298,7 +298,7 @@ def lap(image):
 
 
 def APIPetLandmarks(input_image,pet='dogs'):
-    det = detector.Detector(torch.cuda.is_available())
+    det = detector.Detector(False)
     trheechannel = input_image.copy()
     trheechannel = trheechannel.convert('RGB')
     eyes_dict = det.get_landmarks(im_files=trheechannel,subject_class=pet)#im_files, subject_class
@@ -348,7 +348,7 @@ def third_reconciliation(crop, mask):
     X,Y = transforms.ToTensor()(X), transforms.ToTensor()(Y) #[:-1], transforms.ToTensor()(Y)[:-1]
     best,best_params = model(X,Y)
     T = model.transform(X,params=best_params)
-    print(T.size())
+    #print(T.size())
     tensor_to_pil = transforms.ToPILImage()(T)#.squeeze_(0))
     final_4 = exchangerbg(mask, tensor_to_pil)
     return final_4
@@ -403,7 +403,7 @@ def get_filter_weights(laplacians, file, mask_dict,  min_bbox):
                 rot = a
                 results = out
                 ncenter = new_center
-    print((h_im+res,h_im+res), rot/20)
+    #print((h_im+res,h_im+res), rot/20)
     l_c = laplacians['lap_crop'].copy()
     l_m = laplacians['lap_mask'].copy()
     assert len(results)
@@ -421,7 +421,7 @@ def get_filter_weights(laplacians, file, mask_dict,  min_bbox):
     
     mask_np = np.array(mask)
     mask_np[y1:y2,x1:x2,:3] = pre_np[Y1:Y2,X1:X2,:3]
-    print(np.max(mask_np), np.max(mask_np[:,:,:3]), np.max(mask_np[:,:,3]),np.min(mask_np[:,:,3]),np.mean(mask_np[:,:,3]))
+    #print(np.max(mask_np), np.max(mask_np[:,:,:3]), np.max(mask_np[:,:,3]),np.min(mask_np[:,:,3]),np.mean(mask_np[:,:,3]))
     final = Image.fromarray(mask_np)
     return final
 
@@ -455,12 +455,14 @@ def human_eyes(crop_image_path):
         tmp_local_path_m = tmpdirname + '/' + key_m
         tmp_labels = tmpdirname + '/' + f'{key}_label'
         try:
+            print(source_blob_name,bucket_name,source_blob_name_m)
             downloadBlob(bucket_name, source_blob_name, tmp_local_path)
             downloadBlob(bucket_name, source_blob_name_m, tmp_local_path_m)
         except Exception as e:
             print(str(e))
             logger.log_text(f"problem downloading image {str(e)} on {key}", severity='ERROR')
             return 'wrong input',None, None
+        print('images downloaded')
         try:
             input_image = Image.open(tmp_local_path) #.convert('RGB')
             input_image_m = Image.open(tmp_local_path_m)
@@ -469,35 +471,39 @@ def human_eyes(crop_image_path):
             logger.log_text(f"Problem opening the image {str(e)} on {key}", severity='ERROR')
             return 'image corrupted'
         #class#'cats''dogs''''
+        
         try:
+            print('reconciling 1')
             startl = time.time()
             file,  mask_dict  = first_reconciliation(input_image, input_image_m, key, tmp_labels, classes)
             file.save(tmp_local_path_o)
             upload_blob('model_staging', tmp_local_path_o, destination_blob_name)#to determine
-            results['rec_1']='model_staging/'+destination_blob_name,
+            results.update({'rec_1':'model_staging/'+destination_blob_name})
             middle = time.time()
             print(f'end of first reconciliation {middle-startl}')
             firststep = file.copy()
             file_2 =  second_reconciliation(firststep, mask_dict)
             file_2.save(tmp_local_path_o2)
             upload_blob('model_staging', tmp_local_path_o2, destination_blob_name_2)#to determine
-            results['rec_2']='model_staging/'+destination_blob_name_2,
+            results['rec_2']='model_staging/'+destination_blob_name_2
             fo = time.time()
             print(f'second reconciliation lasted {fo-middle}')
         except Exception as e:
             print(str(e))
             logger.log_text(f"Problem with first reconciliation {str(e)} on {key}", severity='ERROR')
         try:
-            file_3 = second_reconciliation(input_image,  {'image':input_image_m})#['image']
+            print('reconciling 3')
+            file_3 = second_reconciliation(input_image, mask_dict)#['image']
             file_3.save(tmp_local_path_o3)
             upload_blob('model_staging', tmp_local_path_o3, destination_blob_name_3)#to determine
-            results['rec_3']='model_staging/'+destination_blob_name_3,
+            results['rec_3']='model_staging/'+destination_blob_name_3
             ro = time.time()
             print(f'third reconciliaton lated {ro-fo}')
         except Exception as e:
             print(str(e))
             logger.log_text(f"Problem with third reconciliation {str(e)} on {key}", severity='ERROR')
-        try:        
+        try:    
+            print('reconciling 4')
             file_4 = third_reconciliation(input_image, input_image_m)
             file_4.save(tmp_local_path_o4)
             upload_blob('model_staging', tmp_local_path_o4, destination_blob_name_4)#to determine
@@ -509,9 +515,11 @@ def human_eyes(crop_image_path):
         #return file, file_2, file_3, file_4
 
         rows_to_insert = []
+        print(results)
         rows_to_insert.append(results)
         errors = queryclient.insert_rows(table, rows_to_insert)  # API request
-        assert errors == []
+        if errors:
+            print(f'errors{str(errors)}')
         print('querry submitted!')
 
     
@@ -536,7 +544,6 @@ if __name__ == "__main__":
     start = time.time()
     input_image_path = "divvyup_store/socks/600000/crop_of_subject"
     dataloader = input_image_path#this function queries a table and returns a pair of strings
-    print('first process')
     human_eyes(dataloader)
     #firststep, secstep, thirdstep, fourstep = human_eyes(dataloader)
     #print(firststep.size, secstep.size, thirdstep.size, fourstep.size,)
