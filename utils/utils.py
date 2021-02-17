@@ -217,6 +217,154 @@ def APIHumanLandmarks(input_image):
     return angle,  eyes
 
     
+def expanded_bb( final_points):
+    # The function expects the height and width of an image (I called it cropped because 
+    # I was working with simple crop, but any image), and then the "final points" was a 
+    # 2-d array with the position of the landmarks (the first dimension were the y and 
+    # the second dimension the x), and the scale parameters is because I increase the 
+    # asmall bounding box by 15% (I am not sure you want to use it).
+    # read the json/consider x0-x1 for all hat objects, take the max and compare/use the better distance
+    left, right = final_points
+    left_x, left_y = left
+    right_x, right_y = right
+    base_center_x = (left_x+right_x)/2
+    base_center_y = (left_y+right_y)/2 
+    dist_base = abs(complex(left_x, left_y)-complex(right_x, right_y ) )
+    return (int(base_center_x), int(base_center_y) ), dist_base
+
+
+
+
+def lap(image):
+    #transforms image for cv2 to compute laplacian
+    rgb_org_im = img_as_ubyte(image)     
+    origin = np.float32(cv2.cvtColor(rgb_org_im, cv2.COLOR_BGR2GRAY))
+    originL = cv2.Laplacian(origin, -1)
+    return originL
+
+
+def APIPetLandmarks(input_image,pet='dogs'):
+    det = detector.Detector(False)
+    trheechannel = input_image.copy()
+    trheechannel = trheechannel.convert('RGB')
+    eyes_dict = det.get_landmarks(im_files=trheechannel,subject_class=pet)#im_files, subject_class
+    angle = get_angle2(eyes_dict)
+    eyes = eyes_dict['left_eye'], eyes_dict['right_eye']
+    return angle, eyes  
+
+def exchangerbg(four_channel_img, trhee_channel_img, coord=None):
+    mask2 = four_channel_img.copy()
+    four_channel_img2=four_channel_img.copy()
+    four_channel_img2.paste(trhee_channel_img, coord)#into 4 channel
+    array_m = np.array(mask2)[:,:,3]
+    array_b = np.array(four_channel_img2)
+    array_b[:,:,3] = array_m
+    final = Image.fromarray(array_b)
+    return final  
+    
+
+
+def third_reconciliation(crop, mask):
+    #X=crop, Y=underlying rbg from mask
+    Y = mask.copy()
+    X = crop.copy()
+    X = X.convert('RGB')
+    Y = Y.convert('RGB')
+    model = RandomSearch(20,{'x':[-.15,.15],'y':[-.15,.15],'scale':[.75,1.25],'theta':[-10,10]},max_iters=120)
+    X,Y = transforms.ToTensor()(X), transforms.ToTensor()(Y) #[:-1], transforms.ToTensor()(Y)[:-1]
+    best,best_params = model(X,Y)
+    T = model.transform(X,params=best_params)
+    #print(T.size())
+    tensor_to_pil = transforms.ToPILImage()(T)#.squeeze_(0))
+    final_4 = exchangerbg(mask, tensor_to_pil)
+    return final_4
+    #X.permute(1,2,0)
+    
+    
+def second_reconciliation(file, mask_dict, detailed = False):
+    #from file we use the  rbg, mask comes from mask dict
+    mask = np.array(mask_dict['image']).copy()    
+    crop = np.array(file).copy()
+    l_crop = lap(crop[:,:,:3]) #the underlying rbg we want to improve
+    min_bbox = minimum_bounding_box( mask[:,:,3], alpha=0, mode=0) #([y1,x1,y2,x2])#at this moment I also know the center of both images
+    mask_crop = crop_img_from_bbox( mask, min_bbox).copy()
+    l_mask = lap(mask_crop[:,:,:3])*mask_crop[:,:,3]
+    newdict = {'lap_crop':l_crop,'lap_mask':l_mask,'detailed':detailed}
+    rec = get_filter_weights( newdict, file, mask_dict, min_bbox)
+    return rec
+   
+
+def get_filter_weights(laplacians, file, mask_dict,  min_bbox):
+    #we take the original image, 
+    #we multiply by the mask and we crop, 
+    #then we use convolution on the target image.
+    center = complex(mask_dict['center'][0], mask_dict['center'][1])
+    image = laplacians['lap_crop'].copy()
+    target = laplacians['lap_mask'].copy()
+    detailed = laplacians['detailed']
+    if detailed:
+        resizing_range = range(-40, 40)
+        rotating_range = range(-25, 25)
+    else:
+        resizing_range = range(-30, 30)
+        rotating_range = range(-20,20)
+    
+        
+    h_im = 350
+    w_im = 300
+    vector=[]
+    y1,x1,y2,x2 = min_bbox
+    conv_val = -900
+    res = 0
+    rot = 0
+    results = None
+    ncenter = center
+    for i in resizing_range:
+        resized_cropT = resize(image, (h_im+i,h_im+i), anti_aliasing=True)
+        dcenter =complex(int(i*center.real/300), int(i*center.imag/350))
+        new_center = center + dcenter
+        for a in rotating_range:#default -10,10 with angle /20
+            rot_cropT = rotate(resized_cropT/255, angle= a/40, center = (new_center.real, new_center.imag) )*255
+            dx,dy = dcenter.real, dcenter.imag
+            big_out = cv2.filter2D(rot_cropT, -1, target, anchor=(0,0))
+            if big_out.shape[0]<target.shape[0]+1 or big_out.shape[1]<target.shape[1]+1:
+                continue
+            
+            out = big_out[:-target.shape[0],:-target.shape[1]]
+            maxmeasure = np.max(out)#np.max(outT[:-rot_cropT.shape[0],:-rot_cropT.shape[1]])
+            if conv_val < maxmeasure:
+                conv_val = maxmeasure
+                res = i
+                rot = a
+                results = out
+                ncenter = new_center
+    #print((h_im+res,h_im+res), rot/20)
+    l_c = laplacians['lap_crop'].copy()
+    l_m = laplacians['lap_mask'].copy()
+    assert len(results)
+    loc = np.where(results == conv_val)
+    assert len(loc[0]) == 1
+    Y1,X1,Y2,X2 =  (loc[0][0], loc[1][0],
+                                    loc[0][0]+l_m.shape[0],
+                                    loc[1][0]+l_m.shape[1])
+    y1,x1,y2,x2 =  min_bbox #([y1,x1,y2,x2])
+    previous_prediction =  file.copy()#to resize as matrix, to rotate as matrix
+    proposal_size = previous_prediction.resize((h_im+res,h_im+res))
+    proposal_rot = proposal_size.rotate(rot/20, center=(ncenter.real, ncenter.imag))
+    pre_np = np.array(proposal_rot)
+    mask = mask_dict['image'].copy()
+    
+    mask_np = np.array(mask)
+    mask_np[y1:y2,x1:x2,:3] = pre_np[Y1:Y2,X1:X2,:3]
+    #print(np.max(mask_np), np.max(mask_np[:,:,:3]), np.max(mask_np[:,:,3]),np.min(mask_np[:,:,3]),np.mean(mask_np[:,:,3]))
+    final = Image.fromarray(mask_np)
+    return final
+
+def temp_pair2(im_dic):
+    # [ {"key":,"key_m":,"bucket":,"mask":,"crop":,"classes":}]
+    key, key_m,  bucket_name, source_blob_name_m, source_blob_name, classes = im_dic["key"], im_dic["key_m"], im_dic["bucket"], im_dic["mask"], im_dic["crop"], im_dic["classes"]
+    return key, key_m, source_blob_name, source_blob_name_m, bucket_name, classes
+
 def frame(crop_dict, base_dict):
     #current code: expands base, rotates crop
     #goal: expands and rotates crop, base untouch
@@ -224,7 +372,6 @@ def frame(crop_dict, base_dict):
     #base_right =  (165,200)
     # we dont want to modify the mask, we can rescale the input image
     #Get (middle point of average eyes,  eyes' average distance) and (middle point of input image's eyes,  distance between input image's eyes).
-    
     dx=0
     dy=0
     base_angle = base_dict['angle']
@@ -263,49 +410,10 @@ def frame(crop_dict, base_dict):
     #rbg crop, rgba mask, coord
     final = exchangerbg(mask, crop, (int(x_l + dcenter.real), int(y_l + dcenter.imag) ))
     
-    #mask2 = mask.copy()
-    #mask.paste(crop, (int(x_l + dcenter.real), int(y_l + dcenter.imag) ))#into 4 channel
-    #array_m = np.array(mask2)[:,:,3]
-    #array_b = np.array(mask)
-    #array_b[:,:,3] = array_m
-    #final = Image.fromarray(array_b)
     return final
 
-def expanded_bb( final_points):
-    # The function expects the height and width of an image (I called it cropped because 
-    # I was working with simple crop, but any image), and then the "final points" was a 
-    # 2-d array with the position of the landmarks (the first dimension were the y and 
-    # the second dimension the x), and the scale parameters is because I increase the 
-    # asmall bounding box by 15% (I am not sure you want to use it).
-    # read the json/consider x0-x1 for all hat objects, take the max and compare/use the better distance
-    left, right = final_points
-    left_x, left_y = left
-    right_x, right_y = right
-    base_center_x = (left_x+right_x)/2
-    base_center_y = (left_y+right_y)/2 
-    dist_base = abs(complex(left_x, left_y)-complex(right_x, right_y ) )
-    return (int(base_center_x), int(base_center_y) ), dist_base
 
 
-
-
-def lap(image):
-    #transforms image for cv2 to compute laplacian
-    rgb_org_im = img_as_ubyte(image)     
-    origin = np.float32(cv2.cvtColor(rgb_org_im, cv2.COLOR_BGR2GRAY))
-    originL = cv2.Laplacian(origin, -1)
-    return originL
-
-
-def APIPetLandmarks(input_image,pet='dogs'):
-    det = detector.Detector(False)
-    trheechannel = input_image.copy()
-    trheechannel = trheechannel.convert('RGB')
-    eyes_dict = det.get_landmarks(im_files=trheechannel,subject_class=pet)#im_files, subject_class
-    angle = get_angle2(eyes_dict)
-    eyes = eyes_dict['left_eye'], eyes_dict['right_eye']
-    return angle, eyes  
-    
 def first_reconciliation(input_image, input_image_m, key, tmp_labels, label='human'):
     #finds landmarks on both images and identify the images with those coordinates
     
@@ -316,7 +424,7 @@ def first_reconciliation(input_image, input_image_m, key, tmp_labels, label='hum
         angle,  eyes = APIPetLandmarks(input_image, label)
         angle_m, eyes_m = APIPetLandmarks(input_image_m, label)
     
-    if not eyes: 
+    if not eyes or not eyes_m: 
         logger.log_text(f"Missing output on API Human Landmarks on {key}", severity='ERROR')
     im_center, dist_im = expanded_bb(  final_points=eyes)  #test
     im_center_m, dist_im_m = expanded_bb(  final_points=eyes_m)  #test
@@ -327,126 +435,30 @@ def first_reconciliation(input_image, input_image_m, key, tmp_labels, label='hum
     return file,  mask_dict
 
 
-def exchangerbg(four_channel_img, trhee_channel_img, coord=None):
-    mask2 = four_channel_img.copy()
-    four_channel_img.paste(trhee_channel_img, coord)#into 4 channel
-    array_m = np.array(mask2)[:,:,3]
-    array_b = np.array(four_channel_img)
-    array_b[:,:,3] = array_m
-    final = Image.fromarray(array_b)
-    return final  
-    
-
-
-def third_reconciliation(crop, mask):
-    #X=crop, Y=underlying rbg from mask
-    Y = mask.copy()
-    X = crop.copy()
-    X = X.convert('RGB')
-    Y = Y.convert('RGB')
-    model = RandomSearch(20,{'x':[-.15,.15],'y':[-.15,.15],'scale':[.75,1.25],'theta':[-10,10]},max_iters=100)
-    X,Y = transforms.ToTensor()(X), transforms.ToTensor()(Y) #[:-1], transforms.ToTensor()(Y)[:-1]
-    best,best_params = model(X,Y)
-    T = model.transform(X,params=best_params)
-    #print(T.size())
-    tensor_to_pil = transforms.ToPILImage()(T)#.squeeze_(0))
-    final_4 = exchangerbg(mask, tensor_to_pil)
-    return final_4
-    #X.permute(1,2,0)
-    
-    
-def second_reconciliation(file, mask_dict):
-    #from file we use the  rbg, mask comes from mask dict
-    mask = np.array(mask_dict['image']).copy()    
-    crop = np.array(file).copy()
-    l_crop = lap(crop[:,:,:3]) #the underlying rbg we want to improve
-    min_bbox = minimum_bounding_box( mask[:,:,3], alpha=0, mode=0) #([y1,x1,y2,x2])#at this moment I also know the center of both images
-    mask_crop = crop_img_from_bbox( mask, min_bbox).copy()
-    l_mask = lap(mask_crop[:,:,:3])*mask_crop[:,:,3]
-    newdict = {'lap_crop':l_crop,'lap_mask':l_mask}
-    rec = get_filter_weights( newdict, file, mask_dict, min_bbox)
-    return rec
-   
-
-def get_filter_weights(laplacians, file, mask_dict,  min_bbox):
-    #we take the original image, 
-    #we multiply by the mask and we crop, 
-    #then we use convolution on the target image.
-    center = complex(mask_dict['center'][0], mask_dict['center'][1])
-    image = laplacians['lap_crop'].copy()
-    target = laplacians['lap_mask'].copy()
-    h_im = 350
-    w_im = 300
-    vector=[]
-    y1,x1,y2,x2 = min_bbox
-    conv_val = -900
-    res = 0
-    rot = 0
-    results = None
-    ncenter = center
-    for i in range(-30, 30):
-        resized_cropT = resize(image, (h_im+i,h_im+i), anti_aliasing=True)
-        dcenter =complex(int(i*center.real/300), int(i*center.imag/350))
-        new_center = center + dcenter
-        for a in range(-20,20):#default -10,10 with angle /20
-            rot_cropT = rotate(resized_cropT/255, angle= a/40, center = (new_center.real, new_center.imag) )*255
-            dx,dy = dcenter.real, dcenter.imag
-            big_out = cv2.filter2D(rot_cropT, -1, target, anchor=(0,0))
-            if big_out.shape[0]<target.shape[0]+1 or big_out.shape[1]<target.shape[1]+1:
-                continue
-            
-            out = big_out[:-target.shape[0],:-target.shape[1]]
-            maxmeasure = np.max(out)#np.max(outT[:-rot_cropT.shape[0],:-rot_cropT.shape[1]])
-            if conv_val < maxmeasure:
-                conv_val = maxmeasure
-                res = i
-                rot = a
-                results = out
-                ncenter = new_center
-    #print((h_im+res,h_im+res), rot/20)
-    l_c = laplacians['lap_crop'].copy()
-    l_m = laplacians['lap_mask'].copy()
-    assert len(results)
-    loc = np.where(results == conv_val)
-    assert len(loc[0]) == 1
-    Y1,X1,Y2,X2 =  (loc[0][0], loc[1][0],
-                                    loc[0][0]+l_m.shape[0],
-                                    loc[1][0]+l_m.shape[1])
-    y1,x1,y2,x2 =  min_bbox #([y1,x1,y2,x2])
-    previous_prediction =  file.copy()
-    proposal_size = previous_prediction.resize((h_im+res,h_im+res))
-    proposal_rot = proposal_size.rotate(rot/20, center=(ncenter.real, ncenter.imag))
-    pre_np = np.array(proposal_rot)
-    mask = mask_dict['image'].copy()
-    
-    mask_np = np.array(mask)
-    mask_np[y1:y2,x1:x2,:3] = pre_np[Y1:Y2,X1:X2,:3]
-    #print(np.max(mask_np), np.max(mask_np[:,:,:3]), np.max(mask_np[:,:,3]),np.min(mask_np[:,:,3]),np.mean(mask_np[:,:,3]))
-    final = Image.fromarray(mask_np)
-    return final
-
-def temp_pair2(im_dic):
-    # [ {"key":,"key_m":,"bucket":,"mask":,"crop":,"classes":}]
-    key, key_m,  bucket_name, source_blob_name_m, source_blob_name, classes = im_dic["key"], im_dic["key_m"], im_dic["bucket"], im_dic["mask"], im_dic["crop"], im_dic["classes"]
-    return key, key_m, source_blob_name, source_blob_name_m, bucket_name, classes
-
 def human_eyes(crop_image_path):
     # based on image it applies reconciliation    
     file = None
     human = True
     key, key_m, source_blob_name, source_blob_name_m, bucket_name,  classes =  temp_pair2(crop_image_path)
     # [ {"key":,"key_m":,"bucket":,"mask":,"crop":,"classes":}]
-    destination_blob_name = f'reconciliation_test/{key}/{key}'
-    destination_blob_name_2 = f'reconciliation_test/{key}/{key}_2'
-    destination_blob_name_3 = f'reconciliation_test/{key}/{key}_3'
-    destination_blob_name_4 = f'reconciliation_test/{key}/{key}_4'
 
     with tempfile.TemporaryDirectory() as tmpdirname:
+        
+        destination_blob_name = f'reconciliation_test/{key}/{key}'
         tmp_local_path_o = tmpdirname + '/' + key+'out.png'
+
+        destination_blob_name_2 = f'reconciliation_test/{key}/{key}_2'
         tmp_local_path_o2 = tmpdirname + '/' + key+'out2.png'
+
+        destination_blob_name_3 = f'reconciliation_test/{key}/{key}_3'
         tmp_local_path_o3 = tmpdirname + '/' + key+'out3.png'
+
+        destination_blob_name_4 = f'reconciliation_test/{key}/{key}_4'
         tmp_local_path_o4 = tmpdirname + '/' + key+'out4.png'
 
+        destination_blob_name_5 = f'reconciliation_test/{key}/{key}_5'
+        tmp_local_path_o5 = tmpdirname + '/' + key+'out5.png'
+        
         print('created temporary directory', tmpdirname)
         results = {'key' : key,
              'simple_crop':bucket_name+'/'+source_blob_name,
@@ -471,7 +483,6 @@ def human_eyes(crop_image_path):
             logger.log_text(f"Problem opening the image {str(e)} on {key}", severity='ERROR')
             return 'image corrupted'
         #class#'cats''dogs''''
-        
         try:
             print('reconciling 1')
             startl = time.time()
@@ -479,41 +490,66 @@ def human_eyes(crop_image_path):
             file.save(tmp_local_path_o)
             upload_blob('model_staging', tmp_local_path_o, destination_blob_name)#to determine
             results.update({'rec_1':'model_staging/'+destination_blob_name})
-            middle = time.time()
-            print(f'end of first reconciliation {middle-startl}')
+            start2 = time.time()
+            print(f'end of first reconciliation {start2-startl}')    
+        except Exception as e:
+            print(str(e))
+            logger.log_text(f"Problem with first reconciliation {str(e)} on {key}", severity='ERROR')
+        try:    
+            print('reconciling 2')
+            startl = time.time()
             firststep = file.copy()
+            mask_dict['image'] = input_image_m
             file_2 =  second_reconciliation(firststep, mask_dict)
             file_2.save(tmp_local_path_o2)
             upload_blob('model_staging', tmp_local_path_o2, destination_blob_name_2)#to determine
             results['rec_2']='model_staging/'+destination_blob_name_2
-            fo = time.time()
-            print(f'second reconciliation lasted {fo-middle}')
+            start2 = time.time()
+            print(f'end of second reconciliation {start2-startl}')    
         except Exception as e:
             print(str(e))
-            logger.log_text(f"Problem with first reconciliation {str(e)} on {key}", severity='ERROR')
+            logger.log_text(f"Problem with second reconciliation {str(e)} on {key}", severity='ERROR')
         try:
+            startl = time.time()
             print('reconciling 3')
-            file_3 = second_reconciliation(input_image, mask_dict)#['image']
+            mask_dict['image'] = input_image_m
+            file_3 = second_reconciliation(input_image, mask_dict, detailed = True)#['image']
             file_3.save(tmp_local_path_o3)
             upload_blob('model_staging', tmp_local_path_o3, destination_blob_name_3)#to determine
             results['rec_3']='model_staging/'+destination_blob_name_3
-            ro = time.time()
-            print(f'third reconciliaton lated {ro-fo}')
+            start2 = time.time()
+            print(f'end of third reconciliation {start2-startl}') 
         except Exception as e:
             print(str(e))
             logger.log_text(f"Problem with third reconciliation {str(e)} on {key}", severity='ERROR')
-        try:    
+        try:
+            startl = time.time()
             print('reconciling 4')
             file_4 = third_reconciliation(input_image, input_image_m)
             file_4.save(tmp_local_path_o4)
             upload_blob('model_staging', tmp_local_path_o4, destination_blob_name_4)#to determine
             results['rec_4'] = 'model_staging/'+destination_blob_name_4
+            start2 = time.time()
+            print(f'end of forth reconciliation {start2-startl}') 
         except Exception as e:
             print(str(e))
-            logger.log_text(f"Problem with third reconciliation {str(e)} on {key}", severity='ERROR')
-
-        #return file, file_2, file_3, file_4
-
+            logger.log_text(f"Problem with four reconciliation {str(e)} on {key}", severity='ERROR')
+        try:
+            startl = time.time()
+            print('reconciling 5')
+            fourstep = file_4.copy()
+            mask_dict['image'] = input_image_m
+            file_5 =  second_reconciliation(fourstep, mask_dict)
+            file_5.save(tmp_local_path_o5)
+            upload_blob('model_staging', tmp_local_path_o5, destination_blob_name_5)#to determine
+            results['rec_5']='model_staging/'+destination_blob_name_5
+            start2 = time.time()
+            print(f'end of forth reconciliation {start2-startl}') 
+        except Exception as e:
+            print(str(e))
+            logger.log_text(f"Problem with fifth reconciliation {str(e)} on {key}", severity='ERROR')
+            
+            
         rows_to_insert = []
         print(results)
         rows_to_insert.append(results)

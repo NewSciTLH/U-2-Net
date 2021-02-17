@@ -2,10 +2,10 @@
 # $ conda create --name <env> --file <this file>
 # platform: linux-64
 
+google-cloud-core=1.4.4=pyhd3eb1b0_0
 google-cloud-logging=1.15.0=pyh9f0ad1d_0
 google-cloud-bigquery-core=2.1.0=pyhc8dfbb8_0
 google-cloud-storage=1.32.0=pyh9f0ad1d_0
-google-cloud-core=1.4.4=pyhd3eb1b0_0
 google-cloud-vision=0.42.0=py38_0
 pillow=7.2.0=py38hb39fc2d_0
 numpy=1.18.5=py38ha1c710e_0

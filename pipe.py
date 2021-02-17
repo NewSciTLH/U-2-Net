@@ -38,8 +38,8 @@ FROM newsci-1532356874110.divvyup_metadata.reconciliation_input
     to_list = [ {"key":str(item['key']),
                  "key_m":str(item['mask_key'])+'m',
                  "bucket": 'divvyup_data',
-                 "mask":item['simple_crop'],
-                 "crop":item['final_crop'],
+                 "crop":item['simple_crop'],
+                 "mask":item['final_crop'],
                  "classes":item['subject_class']} for item in results if item['subject_class']
               ]
     print(f'We have {len(to_list)} valid inputs')
