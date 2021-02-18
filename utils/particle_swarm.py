@@ -1,11 +1,7 @@
 import torch 
 from PIL import Image
 import torchvision
-#import SSIM
-#import ray
 import numpy as np
-#import joblib
-#from joblib import Parallel, delayed
 
 class RandomSearch(torch.nn.Module):
    # [num_points]: Number of samples we maintain per iteration

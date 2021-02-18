@@ -1,20 +1,15 @@
-# This file may be used to create an environment using:
-# $ conda create --name <env> --file <this file>
-# platform: linux-64
+# Pip Function dependencies, for example:
+# package>=version
 
-google-cloud-core=1.4.4=pyhd3eb1b0_0
-google-cloud-logging=1.15.0=pyh9f0ad1d_0
-google-cloud-bigquery-core=2.1.0=pyhc8dfbb8_0
-google-cloud-storage=1.32.0=pyh9f0ad1d_0
-google-cloud-vision=0.42.0=py38_0
-pillow=7.2.0=py38hb39fc2d_0
-numpy=1.18.5=py38ha1c710e_0
-scikit-image=0.16.2=py38h0573a6f_0
-scikit-learn=0.23.1=py38h423224d_0
-opencv-python=4.4.0.46=pypi_0
-torchvision=0.8.2=py38_cu102
-pytorch=1.7.1=py3.8_cuda10.2.89_cudnn7.6.5_0
-tqdm=4.47.0=py_0
-pandas=1.0.5=py38h0573a6f_0
-python=3.6
-from particle_swarm import RandomSearch
+google-cloud-logging
+google-cloud-bigquery
+google-cloud-storage
+google-cloud-vision
+pillow==7.2.0
+numpy==1.18.5
+scikit-image==0.16.2
+scikit-learn==0.23.1
+opencv-python==4.4.0.46
+torchvision==0.8.2
+torch==1.7.1
+pandas==1.0.5

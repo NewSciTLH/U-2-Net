@@ -3,7 +3,6 @@ import numpy as np
 from PIL import Image
 from itertools import product
 from collections import defaultdict
-from tqdm import tqdm
 import matplotlib.pyplot as plt
 from matplotlib import cm
 from matplotlib import colors
@@ -201,7 +200,7 @@ def gen_all_masks(samples, root_dir, mask_dir, path_sub):
     """
     if not os.path.exists(root_dir + mask_dir):
         os.mkdir(root_dir + mask_dir)
-    for i in tqdm(range(len(samples))):
+    for i in range(len(samples)):
         h, w = samples.landmark_frame.iloc[i, 1:3]
         mask = multi_neighborhood_mask(w, h, samples[i]["landmarks"])
         mask_path = samples.img_paths[i].replace(*path_sub[0]).replace(*path_sub[1])
@@ -232,7 +231,7 @@ def samples_to_dataframe(samples, landmark_names):
         columns=["image_name", "height", "width", *landmark_names],
     )
 
-    for i in tqdm(range(len(samples))):
+    for i in range(len(samples)):
         record = {}
         record["image_name"] = os.path.split(samples.img_paths[i])[-1]
         record["height"] = samples[i]["image"].shape[0]
@@ -251,7 +250,7 @@ def crop_landmarks(df):
     """
     cropped_df = df.copy(deep=True)
 
-    for i, row in tqdm(df.iterrows()):
+    for i, row in df.iterrows():
         w, h = row["width"], row["height"]
         landmarks = np.array(row[3:]).reshape(-1, 2)
         cropped_landmarks = deepcopy(landmarks)
