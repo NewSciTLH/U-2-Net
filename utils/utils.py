@@ -45,6 +45,25 @@ logging_client = logging.Client()
 logger = logging_client.logger(log_name)
 vision_client = vision.ImageAnnotatorClient()
 
+def npcosines(Original, Proposal):
+    if Original.shape!= (350, 300, 4):
+        Original = Original[:350,:300,:4]
+    if Proposal.shape!= (350, 300, 4):
+        Proposal = Proposal[:350,:300,:4]
+    RGB_A = Original[:,:,:3]
+    RGB_B = Proposal[:,:,:3]
+    M_A = Original[:,:,3]
+    M_B = Proposal[:,:,3]
+    A = np.einsum('ijk,ij->ijk', RGB_A, M_A)
+    B = np.einsum('ijk,ij->ijk', RGB_B, M_B)
+    n_A = np.sqrt(np.einsum('ijk,ijk->ij', A, A))
+    n_B = np.sqrt(np.einsum('ijk,ijk->ij', B, B))
+    n = np.einsum('ij,ij->ij', n_A, n_B)
+    C = np.einsum('ijk,ijk->ij', A, B)
+    Sol = np.divide(C, n)
+    Sol[np.isinf(Sol)]=0
+    Sol[np.isnan(Sol)]=0
+    return np.average(Sol,weights=M_A/255)
 
 def get_angle2(eyes):
     eye1 = eyes['left_eye']
@@ -270,15 +289,15 @@ def third_reconciliation(crop, mask):
     X = crop.copy()
     X = X.convert('RGB')
     Y = Y.convert('RGB')
-    model = RandomSearch(20,{'x':[-.15,.15],'y':[-.15,.15],'scale':[.75,1.25],'theta':[-10,10]},max_iters=120)
+    model = RandomSearch(100,{'x':[-.15,.15],'y':[-.15,.15],'scale':[.65,1.3],'theta':[-10,10]},max_iters=50)
     X,Y = transforms.ToTensor()(X), transforms.ToTensor()(Y) #[:-1], transforms.ToTensor()(Y)[:-1]
     best,best_params = model(X,Y)
     T = model.transform(X,params=best_params)
     #print(T.size())
     tensor_to_pil = transforms.ToPILImage()(T)#.squeeze_(0))
     final_4 = exchangerbg(mask, tensor_to_pil)
-    return final_4
-    #X.permute(1,2,0)
+    return final_4, best_params
+    #X.permute(1,2,0)[.65,1.3
     
     
 def second_reconciliation(file, mask_dict, detailed = False):
@@ -290,8 +309,8 @@ def second_reconciliation(file, mask_dict, detailed = False):
     mask_crop = crop_img_from_bbox( mask, min_bbox).copy()
     l_mask = lap(mask_crop[:,:,:3])*mask_crop[:,:,3]
     newdict = {'lap_crop':l_crop,'lap_mask':l_mask,'detailed':detailed}
-    rec = get_filter_weights( newdict, file, mask_dict, min_bbox)
-    return rec
+    rec, ratio, theta = get_filter_weights( newdict, file, mask_dict, min_bbox)
+    return rec, ratio, theta
    
 
 def get_filter_weights(laplacians, file, mask_dict,  min_bbox):
@@ -320,7 +339,7 @@ def get_filter_weights(laplacians, file, mask_dict,  min_bbox):
     results = None
     ncenter = center
     for i in resizing_range:
-        resized_cropT = resize(image, (h_im+i,h_im+i), anti_aliasing=True)
+        resized_cropT = resize(image, (h_im+i,w_im+i), anti_aliasing=True)
         dcenter =complex(int(i*center.real/300), int(i*center.imag/350))
         new_center = center + dcenter
         for a in rotating_range:#default -10,10 with angle /20
@@ -329,7 +348,6 @@ def get_filter_weights(laplacians, file, mask_dict,  min_bbox):
             big_out = cv2.filter2D(rot_cropT, -1, target, anchor=(0,0))
             if big_out.shape[0]<target.shape[0]+1 or big_out.shape[1]<target.shape[1]+1:
                 continue
-            
             out = big_out[:-target.shape[0],:-target.shape[1]]
             maxmeasure = np.max(out)#np.max(outT[:-rot_cropT.shape[0],:-rot_cropT.shape[1]])
             if conv_val < maxmeasure:
@@ -338,8 +356,7 @@ def get_filter_weights(laplacians, file, mask_dict,  min_bbox):
                 rot = a
                 results = out
                 ncenter = new_center
-    #print((h_im+res,h_im+res), rot/20)
-    l_c = laplacians['lap_crop'].copy()
+    
     l_m = laplacians['lap_mask'].copy()
     assert len(results)
     loc = np.where(results == conv_val)
@@ -348,17 +365,16 @@ def get_filter_weights(laplacians, file, mask_dict,  min_bbox):
                                     loc[0][0]+l_m.shape[0],
                                     loc[1][0]+l_m.shape[1])
     y1,x1,y2,x2 =  min_bbox #([y1,x1,y2,x2])
-    previous_prediction =  file.copy()#to resize as matrix, to rotate as matrix
-    proposal_size = previous_prediction.resize((h_im+res,h_im+res))
-    proposal_rot = proposal_size.rotate(rot/20, center=(ncenter.real, ncenter.imag))
-    pre_np = np.array(proposal_rot)
+    previous_prediction =  np.array(file.copy())[:,:,:3]#to resize as matrix, to rotate as matrix
+    previous_prediction = previous_prediction / np.max(previous_prediction)
+    resized = resize(previous_prediction, (h_im+res,w_im+res), anti_aliasing=True)
+    pre_np = np.uint8(rotate(resized, angle= rot/40, center = (ncenter.real, ncenter.imag) )*255)
     mask = mask_dict['image'].copy()
     
     mask_np = np.array(mask)
     mask_np[y1:y2,x1:x2,:3] = pre_np[Y1:Y2,X1:X2,:3]
-    #print(np.max(mask_np), np.max(mask_np[:,:,:3]), np.max(mask_np[:,:,3]),np.min(mask_np[:,:,3]),np.mean(mask_np[:,:,3]))
     final = Image.fromarray(mask_np)
-    return final
+    return final, (h_im+res)/350, rot/40
 
 def temp_pair2(im_dic):
     # [ {"key":,"key_m":,"bucket":,"mask":,"crop":,"classes":}]
@@ -410,7 +426,7 @@ def frame(crop_dict, base_dict):
     #rbg crop, rgba mask, coord
     final = exchangerbg(mask, crop, (int(x_l + dcenter.real), int(y_l + dcenter.imag) ))
     
-    return final
+    return final, ratio
 
 
 
@@ -430,7 +446,10 @@ def first_reconciliation(input_image, input_image_m, key, tmp_labels, label='hum
     im_center_m, dist_im_m = expanded_bb(  final_points=eyes_m)  #test
     crop_dict={'angle':angle, 'eyes':eyes, 'image':input_image,'center':im_center, 'dist':dist_im}
     mask_dict={'angle':angle_m, 'eyes':eyes_m, 'image':input_image_m,'center':im_center_m, 'dist':dist_im_m}
-    file =  frame(crop_dict, mask_dict)
+    file, ratio =  frame(crop_dict, mask_dict)
+    dangle = angle_m-angle
+    mask_dict['dangle'] = dangle
+    mask_dict['ratio'] = ratio
     file.save(tmp_labels, 'png')
     return file,  mask_dict
 
@@ -485,11 +504,16 @@ def human_eyes(crop_image_path):
         #class#'cats''dogs''''
         try:
             print('reconciling 1')
+            #eyes
             startl = time.time()
-            file,  mask_dict  = first_reconciliation(input_image, input_image_m, key, tmp_labels, classes)
+            first_copy = input_image.copy().convert('RGB')
+            file,  mask_dict  = first_reconciliation(first_copy, input_image_m, key, tmp_labels, classes)
             file.save(tmp_local_path_o)
-            upload_blob('model_staging', tmp_local_path_o, destination_blob_name)#to determine
-            results.update({'rec_1':'model_staging/'+destination_blob_name})
+            upload_blob('model_staging', tmp_local_path_o, destination_blob_name)#to determine 
+            i_c = input_image_m.copy()
+            o_c = file.copy()
+            distance = npcosines(np.array(i_c), np.array(o_c) )
+            results.update({'rec_1':'model_staging/'+destination_blob_name, 'distance_1':distance,'angle_1':mask_dict['dangle'], 'ratio_1':mask_dict['ratio'] })
             start2 = time.time()
             print(f'end of first reconciliation {start2-startl}')    
         except Exception as e:
@@ -498,12 +522,16 @@ def human_eyes(crop_image_path):
         try:    
             print('reconciling 2')
             startl = time.time()
-            firststep = file.copy()
+            firststep = file.copy().convert('RGB')
             mask_dict['image'] = input_image_m
-            file_2 =  second_reconciliation(firststep, mask_dict)
+            file_2, ratio_2, theta_2 =  second_reconciliation(firststep, mask_dict)
             file_2.save(tmp_local_path_o2)
             upload_blob('model_staging', tmp_local_path_o2, destination_blob_name_2)#to determine
-            results['rec_2']='model_staging/'+destination_blob_name_2
+            i_c2 = input_image_m.copy()
+            o_c2 = file_2.copy()
+            distance_2 = npcosines(np.array(i_c2), np.array(o_c2) )
+            results.update({'rec_2':'model_staging/'+destination_blob_name_2, 'distance_2':distance_2,
+                           'ratio_2':ratio_2, 'angle_2':theta_2})
             start2 = time.time()
             print(f'end of second reconciliation {start2-startl}')    
         except Exception as e:
@@ -512,11 +540,17 @@ def human_eyes(crop_image_path):
         try:
             startl = time.time()
             print('reconciling 3')
+            #old rec
             mask_dict['image'] = input_image_m
-            file_3 = second_reconciliation(input_image, mask_dict, detailed = True)#['image']
+            second_copy = input_image.copy().convert('RGB')
+            file_3, ratio_3, theta_3 = second_reconciliation(second_copy, mask_dict, detailed = True)#['image']
             file_3.save(tmp_local_path_o3)
             upload_blob('model_staging', tmp_local_path_o3, destination_blob_name_3)#to determine
-            results['rec_3']='model_staging/'+destination_blob_name_3
+            i_c3 = input_image_m.copy()
+            o_c3 = file_3.copy()
+            distance_3 = npcosines(np.array(i_c3), np.array(o_c3) )
+            results.update({'rec_3':'model_staging/'+destination_blob_name_3, 'distance_3':distance_3,
+                           'ratio_3':ratio_3, 'angle_3':theta_3})
             start2 = time.time()
             print(f'end of third reconciliation {start2-startl}') 
         except Exception as e:
@@ -525,10 +559,16 @@ def human_eyes(crop_image_path):
         try:
             startl = time.time()
             print('reconciling 4')
-            file_4 = third_reconciliation(input_image, input_image_m)
+            #luke
+            third_copy = input_image.copy().convert('RGB')
+            file_4, param = third_reconciliation(third_copy, input_image_m)
             file_4.save(tmp_local_path_o4)
             upload_blob('model_staging', tmp_local_path_o4, destination_blob_name_4)#to determine
-            results['rec_4'] = 'model_staging/'+destination_blob_name_4
+            i_c4 = input_image_m.copy()
+            o_c4 = file_4.copy()
+            distance_4 = npcosines(np.array(i_c4), np.array(o_c4) )
+            results.update({'rec_4':'model_staging/'+destination_blob_name_4, 'distance_4':distance_4,
+                           'ratio_4':param[2].item(), 'angle_4':param[3].item()})
             start2 = time.time()
             print(f'end of forth reconciliation {start2-startl}') 
         except Exception as e:
@@ -537,12 +577,16 @@ def human_eyes(crop_image_path):
         try:
             startl = time.time()
             print('reconciling 5')
-            fourstep = file_4.copy()
+            fourstep = file_4.copy().convert('RGB')
             mask_dict['image'] = input_image_m
-            file_5 =  second_reconciliation(fourstep, mask_dict)
+            file_5, ratio_5, theta_5  =  second_reconciliation(fourstep, mask_dict)
             file_5.save(tmp_local_path_o5)
             upload_blob('model_staging', tmp_local_path_o5, destination_blob_name_5)#to determine
-            results['rec_5']='model_staging/'+destination_blob_name_5
+            i_c5 = input_image_m.copy()
+            o_c5 = file_5.copy()
+            distance_5 = npcosines(np.array(i_c5), np.array(o_c5) )
+            results.update({'rec_5':'model_staging/'+destination_blob_name_5, 'distance_5':distance_5,
+                           'ratio_5':ratio_5, 'angle_5':theta_5})
             start2 = time.time()
             print(f'end of forth reconciliation {start2-startl}') 
         except Exception as e:
